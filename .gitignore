@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.local
+*.log
+
+# Data
+data/*
+!data/.gitkeep
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# Build
+dist/
+build/
+
+# Streamlit cache
+**/.streamlit/
+
+# SQLite
+*.db
