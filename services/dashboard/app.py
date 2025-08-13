@@ -1,83 +1,84 @@
 # services/dashboard/app.py
-import os
-import pandas as pd
+import os, html, sqlite3
 import streamlit as st
-from sqlalchemy import create_engine, text
 
-# --- Ustawienia strony i drobny cleanup UI ---
+# — Minimalny wygląd —
 st.set_page_config(page_title="Jobs – Minimal", layout="centered")
 st.markdown(
-    """
+    '''
     <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    .block-container {padding-top: 2rem; padding-bottom: 2rem;}
+      #MainMenu {visibility: hidden;} footer {visibility: hidden;}
+      .block-container {padding-top: 2rem; padding-bottom: 2rem; max-width: 900px;}
+      table.mini {width: 100%; border-collapse: collapse; font-size: 0.95rem;}
+      table.mini th, table.mini td {padding: 8px 10px; border-bottom: 1px solid #2a2a2a;}
+      table.mini th {text-align: left; font-weight: 600;}
     </style>
-    """,
+    ''',
     unsafe_allow_html=True,
 )
 
-# --- Baza ---
 DB_PATH = os.getenv("DB_PATH", "data/ai_jobs.db")
-engine = create_engine(f"sqlite:///{DB_PATH}", future=True)
 
-def search_jobs(q: str | None, location: str | None, seniority: str | None, limit: int = 300) -> pd.DataFrame:
+def query_jobs(q=None, loc=None, sen=None, limit=300):
     """
-    Proste wyszukiwanie:
-    - q          -> tytuł (contains, case-insensitive)
-    - location   -> lokalizacja (contains, case-insensitive)
-    - seniority  -> exact (Junior/Mid/Senior, case-insensitive; puste = brak filtra)
-    Zwraca 4 kolumny: title, seniority, location, company
+    Szukanie:
+      - q  -> tytuł (LIKE %fragment%, case-insensitive)
+      - loc -> lokalizacja (LIKE %fragment%, case-insensitive)
+      - sen -> exact 'junior/mid/senior' (case-insensitive)
+    Zwraca: title, seniority, location, company
     """
     sql = """
         SELECT title, seniority, location, company
         FROM jobs_clean
         WHERE 1=1
     """
-    params: dict[str, str | int] = {}
+    params = {}
 
     if q:
         sql += " AND lower(title) LIKE :q "
         params["q"] = f"%{q.lower().strip()}%"
 
-    if location:
+    if loc:
         sql += " AND lower(location) LIKE :loc "
-        params["loc"] = f"%{location.lower().strip()}%"
+        params["loc"] = f"%{loc.lower().strip()}%"
 
-    if seniority:
+    if sen:
         sql += " AND lower(seniority) = :sen "
-        params["sen"] = seniority.lower().strip()
+        params["sen"] = sen.lower().strip()
 
+    # ✅ Bez 'posted_at' — wspiera istniejącą schemę
     sql += " ORDER BY rowid DESC LIMIT :limit "
     params["limit"] = int(limit)
 
-    with engine.begin() as conn:
-        rows = conn.execute(text(sql), params).mappings().all()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(sql, params).fetchall()
+    return rows
 
-    df = pd.DataFrame(rows, columns=["title", "seniority", "location", "company"])
-    return df
-
-
-# --- UI (minimal) ---
+# — UI —
 st.title("🔎 Jobs – Minimal search")
+c1, c2, c3 = st.columns(3)
+with c1:
+    loc_in = st.text_input("Lokalizacja", placeholder="np. warsz / wro / zdalnie")
+with c2:
+    sen_in = st.text_input("Seniority", placeholder="Junior / Mid / Senior")
+with c3:
+    ttl_in = st.text_input("Tytuł pracy", placeholder="np. Data")
 
-col1, col2, col3 = st.columns([1, 1, 1])
-with col1:
-    location_in = st.text_input("Lokalizacja", placeholder="np. Warszawa / wro / zdalnie", help="Filtrowanie zawiera, bez rozróżniania wielkości liter.")
-with col2:
-    seniority_in = st.text_input("Seniority", placeholder="Junior / Mid / Senior", help="Wpisz dokładnie Junior, Mid lub Senior (bez rozróżniania wielkości liter).")
-with col3:
-    title_in = st.text_input("Tytuł pracy", placeholder="np. Data", help="Np. Data → znajdzie Data Engineer / Data Scientist itp.")
-
-# Wyniki
-df = search_jobs(q=title_in or None, location=location_in or None, seniority=seniority_in or None)
-
+rows = query_jobs(q=ttl_in or None, loc=loc_in or None, sen=sen_in or None)
 st.caption(f"Baza: {DB_PATH}")
-st.write(f"Wyniki: **{len(df)}**")
+st.write(f"Wyniki: **{len(rows)}**")
 
-if df.empty:
-    st.info("Brak rekordów dla podanych filtrów. Spróbuj zostawić pola puste lub wpisz krótszy fragment (np. 'wro', 'data').")
+if not rows:
+    st.info("Brak rekordów. Zostaw pola puste albo użyj krótszego fragmentu (np. 'data', 'wro').")
 else:
-    # schludne nagłówki po PL
-    df = df.rename(columns={"title": "Tytuł", "seniority": "Seniority", "location": "Lokalizacja", "company": "Firma"})
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    header = ["Tytuł", "Seniority", "Lokalizacja", "Firma"]
+    body = "".join(
+        f"<tr><td>{html.escape(r['title'] or '')}</td>"
+        f"<td>{html.escape(r['seniority'] or '')}</td>"
+        f"<td>{html.escape(r['location'] or '')}</td>"
+        f"<td>{html.escape(r['company'] or '')}</td></tr>"
+        for r in rows
+    )
+    table = "<table class='mini'><thead><tr>" + "".join(f"<th>{h}</th>" for h in header) + "</tr></thead><tbody>" + body + "</tbody></table>"
+    st.markdown(table, unsafe_allow_html=True)
