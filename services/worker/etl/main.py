@@ -48,23 +48,21 @@ def upsert_raw(engine: Engine, rows: List[Dict]):
 # Seniority – HELPERY I PRIORYTETY
 # ---------------------------------
 
-# szersze słowniki/synonimy
+# szerokie synonimy
 _JUN_RE = re.compile(r"\b(junior|intern|trainee|student|jr)\b", re.I)
 _SEN_RE = re.compile(r"\b(senior|lead|principal|staff|expert|architect|sr)\b", re.I)
 _MID_RE = re.compile(r"\b(mid|middle|regular)\b", re.I)
 
-
 def normalize_source_seniority(value: Optional[str]) -> Optional[str]:
     """
-    1) Najpierw ufa danym z bazy/źródła:
-       - Junior: junior, jr, intern, trainee, student
-       - Senior: senior, sr, lead, principal, staff, expert, architect
-       - Mid:    mid, middle, regular
-       - Brak/unspecified → Mid
-    2) Jeśli nie rozpoznano nic sensownego → zwróć None (da szansę tytułowi).
+    Priorytet 1: to co mówi źródło.
+      - Jeśli WARTOŚĆ NIE ISTNIEJE (None) → zwróć None (DAJ SZANSĘ TYTUŁOWI).
+      - Jeśli źródło jawnie mówi 'brak/unspecified/empty' → 'Mid'.
+      - Jeśli Junior/Senior/Mid (lub synonimy) → odpowiedni poziom.
+      - Jeśli nic nie pasuje → None (spróbuje tytuł).
     """
     if value is None:
-        return "Mid"
+        return None  # <— KLUCZOWA ZMIANA: wcześniej było 'Mid'
     v = str(value).strip().lower()
     if v in {"", "brak", "unspecified", "unknown", "none", "n/a", "na"}:
         return "Mid"
@@ -74,11 +72,10 @@ def normalize_source_seniority(value: Optional[str]) -> Optional[str]:
         return "Senior"
     if any(k in v for k in ["regular", "middle", "mid"]):
         return "Mid"
-    return None  # niech zdecyduje tytuł/NLP
-
+    return None  # zostaw tytuł/NLP do decyzji
 
 def infer_from_title(title: str) -> Optional[str]:
-    """Faza 2: próba z tytułu."""
+    """Priorytet 2: tytuł."""
     t = (title or "").strip()
     if not t:
         return None
@@ -90,11 +87,10 @@ def infer_from_title(title: str) -> Optional[str]:
         return "Mid"
     return None
 
-
 def choose_seniority(raw_sen: Optional[str], title: str, desc: str) -> str:
     """
     Priorytety:
-      1) surowe dane (mapowane normalize_source_seniority)
+      1) źródło (normalize_source_seniority)
       2) tytuł
       3) NLP (opcjonalny tie-breaker)
       4) domyślnie 'Mid'
@@ -132,7 +128,6 @@ def build_clean_rows(rows: List[Dict]) -> List[Dict]:
         desc = (r.get("desc") or r.get("description") or "").strip()
         raw_sen = r.get("seniority")  # jeśli źródło coś daje – użyjemy najpierw
 
-        # skills (prosta ekstrakcja)
         skills_list = extract_skills(desc) or []
         skills_csv = ", ".join(sorted({s.strip() for s in skills_list if s}))
 
@@ -146,7 +141,7 @@ def build_clean_rows(rows: List[Dict]) -> List[Dict]:
                 "location": r.get("location"),
                 "desc": desc,
                 "source": r.get("source"),
-                "posted_at": r.get("posted_at"),  # może być None – schema na to pozwala
+                "posted_at": r.get("posted_at"),  # może być None
                 "url": r.get("url"),
                 "skills": skills_csv,
                 "seniority": seniority,
@@ -170,7 +165,6 @@ def main():
     logger.info("Start ETL | DB_PATH=%s", DB_PATH)
     engine = get_engine()
 
-    # Schemat
     metadata.create_all(engine)
     logger.info("Połączono z bazą i upewniono się, że schemat istnieje")
 
