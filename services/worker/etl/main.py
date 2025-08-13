@@ -6,12 +6,8 @@ from schema import metadata, jobs_table, jobs_clean
 from dedup import simple_dedup
 from nlp import extract_skills, infer_seniority
 
-# ŹRÓDŁA (Adzuna działa stabilnie; NFJ może czasem zwrócić 0)
-from sources.adzuna import fetch_jobs as fetch_adzuna
-try:
-    from sources.nofluff import fetch_jobs as fetch_nofluff
-except Exception:
-    fetch_nofluff = None
+from sources.nofluff import fetch_jobs as fetch_nfj
+from sources.jj_apify import fetch_jobs as fetch_jj
 
 load_dotenv()
 DB_PATH = os.getenv("DB_PATH", "data/ai_jobs.db")
@@ -24,29 +20,33 @@ def ensure_tables(engine):
     metadata.create_all(engine)
 
 def ingest_raw(engine):
-    print("[ETL] fetching from Adzuna...")
-    a = fetch_adzuna(limit=150, query="data OR python OR sql")
-    print(f"[ETL] Adzuna: {len(a)}")
+    print("[ETL] fetching from NoFluffJobs...")
+    nfj = fetch_nfj(limit=200, query="data OR python OR sql")
+    print(f"[ETL] NFJ: {len(nfj)}")
 
-    n = []
-    if fetch_nofluff:
-        print("[ETL] fetching from NoFluffJobs...")
-        try:
-            n = fetch_nofluff(limit=150, query="data")
-        except Exception as e:
-            print(f"[ETL] NFJ error: {e}")
-        print(f"[ETL] NFJ: {len(n)}")
+    print("[ETL] fetching from JustJoinIT (Apify)...")
+    jj = fetch_jj(limit=200, query="data OR python OR sql")
+    print(f"[ETL] JJ: {len(jj)}")
 
-    data = a + n
+    data = nfj + jj
     print(f"[ETL] total before dedup: {len(data)}")
-    data = simple_dedup(data, key="id")
-    print(f"[ETL] total after dedup:  {len(data)}")
+    # dedup po id; jeśli brak id, dedup po (title,company)
+    data = simple_dedup(data, key="id") or data
+    seen = set()
+    merged = []
+    for d in data:
+        k = (d["title"].lower(), d["company"].lower())
+        if k in seen: 
+            continue
+        seen.add(k)
+        merged.append(d)
+    print(f"[ETL] total after dedup:  {len(merged)}")
 
     with engine.begin() as conn:
-        conn.execute(delete(jobs_table))  # pełna podmiana (demo)
-        for row in data:
+        conn.execute(delete(jobs_table))
+        for row in merged:
             conn.execute(insert(jobs_table).values(**row))
-    return len(data)
+    return len(merged)
 
 def transform_clean(engine):
     with engine.begin() as conn:
@@ -55,15 +55,15 @@ def transform_clean(engine):
         )).mappings().all()
         conn.execute(delete(jobs_clean))
         for r in rows:
+            # skille z naszego prostego ekstraktora
             skills = extract_skills(r["description"] or "")
-            seniority = infer_seniority(f"{r['title']} {r['description'] or ''}")
+            # seniority: jeśli nie ma od źródła, spróbuj zgadnąć z tytułu/opisu
+            guessed = infer_seniority(f"{r['title']} {r['description'] or ''}")
             conn.execute(insert(jobs_clean).values(
-                id=r["id"],
-                title=r["title"],
-                company=r["company"],
+                id=r["id"], title=r["title"], company=r["company"],
                 location=r["location"],
                 skills=",".join(skills),
-                seniority=seniority,
+                seniority=guessed,
                 tech_stack=",".join(skills),
                 source=r["source"]
             ))

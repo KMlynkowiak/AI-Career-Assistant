@@ -2,6 +2,10 @@ from sqlalchemy import Table, Column, String, MetaData, Text
 
 metadata = MetaData()
 
+from sqlalchemy import Table, Column, String, Text, MetaData
+
+metadata = MetaData()
+
 jobs_table = Table(
     "jobs_raw",
     metadata,
@@ -11,7 +15,9 @@ jobs_table = Table(
     Column("location", String),
     Column("description", Text),
     Column("source", String),
+    Column("seniority", String),  # <-- dodaj to
 )
+
 
 jobs_clean = Table(
     "jobs_clean",
