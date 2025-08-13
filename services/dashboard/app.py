@@ -19,12 +19,29 @@ st.markdown(
 
 DB_PATH = os.getenv("DB_PATH", "data/ai_jobs.db")
 
-def query_jobs(q=None, loc=None, sen=None, limit=300):
+# --- meta: unikalne wartości do selectów (cache'owane) ---
+@st.cache_data(ttl=300)
+def get_distinct(col: str, limit: int = 200):
+    if col not in {"title", "location", "seniority"}:
+        return []
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = lambda c, r: r[0]
+            rows = conn.execute(
+                f"SELECT DISTINCT {col} FROM jobs_clean WHERE {col} IS NOT NULL ORDER BY {col} LIMIT ?",
+                (limit,),
+            ).fetchall()
+        # usuń puste/None i zwróć listę stringów
+        return [str(x) for x in rows if x]
+    except Exception:
+        return []
+
+def query_jobs(title_eq=None, loc_eq=None, sen_eq=None, limit: int = 500):
     """
-    Szukanie:
-      - q   -> tytuł (LIKE %fragment%, case-insensitive)
-      - loc -> lokalizacja (LIKE %fragment%, case-insensitive)
-      - sen -> exact 'junior/mid/senior' (case-insensitive)
+    Filtry exact (bo wybieramy z listy):
+      - title_eq -> dokładny tytuł
+      - loc_eq   -> dokładna lokalizacja
+      - sen_eq   -> dokładne seniority (Junior/Mid/Senior)
     Zwraca: title, seniority, location, company
     """
     sql = """
@@ -33,20 +50,16 @@ def query_jobs(q=None, loc=None, sen=None, limit=300):
         WHERE 1=1
     """
     params = {}
+    if title_eq:
+        sql += " AND lower(title) = :t "
+        params["t"] = title_eq.lower()
+    if loc_eq:
+        sql += " AND lower(location) = :l "
+        params["l"] = loc_eq.lower()
+    if sen_eq:
+        sql += " AND lower(seniority) = :s "
+        params["s"] = sen_eq.lower()
 
-    if q:
-        sql += " AND lower(title) LIKE :q "
-        params["q"] = f"%{q.lower().strip()}%"
-
-    if loc:
-        sql += " AND lower(location) LIKE :loc "
-        params["loc"] = f"%{loc.lower().strip()}%"
-
-    if sen:
-        sql += " AND lower(seniority) = :sen "
-        params["sen"] = sen.lower().strip()
-
-    # Brak wymagania na kolumnę posted_at — wspiera istniejącą bazę
     sql += " ORDER BY rowid DESC LIMIT :limit "
     params["limit"] = int(limit)
 
@@ -55,28 +68,37 @@ def query_jobs(q=None, loc=None, sen=None, limit=300):
         rows = conn.execute(sql, params).fetchall()
     return rows
 
-# — UI: formularz (nic nie pokazujemy, dopóki nie klikniesz 'Szukaj') —
+# — UI: formularz; nic nie pokazujemy dopóki nie klikniesz "Szukaj" —
 st.title("🔎 Jobs – Minimal search")
+
+titles = ["(Dowolna)"] + get_distinct("title")
+locations = ["(Dowolna)"] + get_distinct("location")
+seniorities = ["(Dowolna)", "Junior", "Mid", "Senior"]
 
 with st.form("search"):
     c1, c2, c3 = st.columns(3)
     with c1:
-        loc_in = st.text_input("Lokalizacja", placeholder="np. warsz / wro / zdalnie")
+        loc_choice = st.selectbox("Lokalizacja", locations, index=0)
     with c2:
-        sen_in = st.text_input("Seniority", placeholder="Junior / Mid / Senior")
+        sen_choice = st.selectbox("Seniority", seniorities, index=0)
     with c3:
-        ttl_in = st.text_input("Tytuł pracy", placeholder="np. Data")
+        title_choice = st.selectbox("Tytuł pracy", titles, index=0)
     submitted = st.form_submit_button("Szukaj")
 
 st.caption(f"Baza: {DB_PATH}")
 
 if not submitted:
-    st.info("Uzupełnij dowolne pole i kliknij **Szukaj** – wtedy pokażę wyniki.")
+    st.info("Wybierz z listy i kliknij **Szukaj**.")
 else:
-    rows = query_jobs(q=ttl_in or None, loc=loc_in or None, sen=sen_in or None)
+    loc_val = None if loc_choice == "(Dowolna)" else loc_choice
+    sen_val = None if sen_choice == "(Dowolna)" else sen_choice
+    title_val = None if title_choice == "(Dowolna)" else title_choice
+
+    rows = query_jobs(title_eq=title_val, loc_eq=loc_val, sen_eq=sen_val)
     st.write(f"Wyniki: **{len(rows)}**")
+
     if not rows:
-        st.warning("Brak rekordów. Spróbuj krótszego fragmentu (np. 'data', 'wro').")
+        st.warning("Brak rekordów. Spróbuj innego wyboru lub zostaw „(Dowolna)”.")
     else:
         header = ["Tytuł", "Seniority", "Lokalizacja", "Firma"]
         body = "".join(
