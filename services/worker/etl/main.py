@@ -1,4 +1,6 @@
 # services/worker/etl/main.py
+from __future__ import annotations
+
 import os
 import re
 import logging
@@ -12,6 +14,7 @@ from services.worker.etl.schema import metadata, jobs_table, jobs_clean
 from services.worker.etl.dedup import simple_dedup
 from services.worker.etl.nlp import extract_skills, infer_seniority
 
+# Źródła ogłoszeń
 from services.worker.etl.sources.nofluff import fetch_jobs as fetch_nfj
 from services.worker.etl.sources.jj_apify import fetch_jobs as fetch_jj
 
@@ -31,52 +34,51 @@ logger = logging.getLogger("etl")
 
 
 def get_engine() -> Engine:
-    uri = f"sqlite:///{DB_PATH}"
-    engine = create_engine(uri, future=True)
-    return engine
+    return create_engine(f"sqlite:///{DB_PATH}", future=True)
 
 
 def upsert_raw(engine: Engine, rows: List[Dict]):
-    """Czyścimy jobs_table i wstawiamy świeże rekordy (demo/portfolio)."""
+    """Czyści jobs_table i wstawia świeże rekordy (prosta, powtarzalna demo-ładowarka)."""
     with engine.begin() as conn:
         conn.execute(delete(jobs_table))
         if rows:
             conn.execute(insert(jobs_table), rows)
 
-# -----------------------
-# Seniority – nowa logika
-# -----------------------
+# ---------------------------------
+# Seniority – HELPERY I PRIORYTETY
+# ---------------------------------
+
+# szersze słowniki/synonimy
+_JUN_RE = re.compile(r"\b(junior|intern|trainee|student|jr)\b", re.I)
+_SEN_RE = re.compile(r"\b(senior|lead|principal|staff|expert|architect|sr)\b", re.I)
+_MID_RE = re.compile(r"\b(mid|middle|regular)\b", re.I)
+
 
 def normalize_source_seniority(value: Optional[str]) -> Optional[str]:
     """
-    1) Najpierw ufa danym z bazy (źródła):
-       - 'junior'/'jr' -> 'Junior'
-       - 'senior'/'sr' -> 'Senior'
-       - 'mid'/'regular' -> 'Mid'
-       - 'brak', '', None, 'unspecified', 'unknown', 'n/a' -> 'Mid'
-    2) Jeśli nie rozpoznano, zwraca None (żeby dać szansę tytułowi).
+    1) Najpierw ufa danym z bazy/źródła:
+       - Junior: junior, jr, intern, trainee, student
+       - Senior: senior, sr, lead, principal, staff, expert, architect
+       - Mid:    mid, middle, regular
+       - Brak/unspecified → Mid
+    2) Jeśli nie rozpoznano nic sensownego → zwróć None (da szansę tytułowi).
     """
     if value is None:
-        return "Mid"  # brak -> Mid
+        return "Mid"
     v = str(value).strip().lower()
     if v in {"", "brak", "unspecified", "unknown", "none", "n/a", "na"}:
         return "Mid"
-    if "junior" in v or v == "jr":
+    if any(k in v for k in ["junior", "intern", "trainee", "student", "jr"]):
         return "Junior"
-    if "senior" in v or v == "sr":
+    if any(k in v for k in ["senior", "lead", "principal", "staff", "expert", "architect", "sr"]):
         return "Senior"
-    if "regular" in v or v.startswith("mid"):
+    if any(k in v for k in ["regular", "middle", "mid"]):
         return "Mid"
-    # nieznane – spróbujemy tytułu
-    return None
+    return None  # niech zdecyduje tytuł/NLP
 
-
-_JUN_RE = re.compile(r"\bjunior\b", re.I)
-_SEN_RE = re.compile(r"\bsenior\b", re.I)
-_MID_RE = re.compile(r"\bmid\b|\bregular\b", re.I)
 
 def infer_from_title(title: str) -> Optional[str]:
-    """Faza 2: próba z tytułu (bez NLP)."""
+    """Faza 2: próba z tytułu."""
     t = (title or "").strip()
     if not t:
         return None
@@ -92,27 +94,28 @@ def infer_from_title(title: str) -> Optional[str]:
 def choose_seniority(raw_sen: Optional[str], title: str, desc: str) -> str:
     """
     Priorytety:
-      1) surowe dane (mapowane przez normalize_source_seniority)
+      1) surowe dane (mapowane normalize_source_seniority)
       2) tytuł
-      3) (opcjonalnie) NLP
+      3) NLP (opcjonalny tie-breaker)
       4) domyślnie 'Mid'
     """
     s1 = normalize_source_seniority(raw_sen)
     if s1 is not None:
         return s1
+
     s2 = infer_from_title(title)
     if s2 is not None:
         return s2
-    # opcjonalny tie-breaker z NLP — tylko gdy nadal nieustalone
+
     s3 = infer_seniority(f"{title} {desc}") or None
     if s3:
-        # zmapuj wynik NLP do naszych 3 poziomów
         lo = str(s3).lower()
         if "jun" in lo:
             return "Junior"
         if "sen" in lo:
             return "Senior"
         return "Mid"
+
     return "Mid"
 
 # -----------------------
@@ -120,14 +123,18 @@ def choose_seniority(raw_sen: Optional[str], title: str, desc: str) -> str:
 # -----------------------
 
 def build_clean_rows(rows: List[Dict]) -> List[Dict]:
-    """Wzbogacanie NLP + normalizacja pod jobs_clean."""
-    out = []
+    """
+    Normalizacja pod jobs_clean + proste NLP (skills) + klasyfikacja seniority.
+    """
+    out: List[Dict] = []
     for r in rows:
-        title = r.get("title") or ""
-        desc = r.get("desc") or r.get("description") or ""
-        raw_sen = r.get("seniority")  # jeżeli źródło coś daje – użyjemy tego najpierw
+        title = (r.get("title") or "").strip()
+        desc = (r.get("desc") or r.get("description") or "").strip()
+        raw_sen = r.get("seniority")  # jeśli źródło coś daje – użyjemy najpierw
 
+        # skills (prosta ekstrakcja)
         skills_list = extract_skills(desc) or []
+        skills_csv = ", ".join(sorted({s.strip() for s in skills_list if s}))
 
         seniority = choose_seniority(raw_sen=raw_sen, title=title, desc=desc)
 
@@ -139,9 +146,9 @@ def build_clean_rows(rows: List[Dict]) -> List[Dict]:
                 "location": r.get("location"),
                 "desc": desc,
                 "source": r.get("source"),
-                "posted_at": r.get("posted_at"),
+                "posted_at": r.get("posted_at"),  # może być None – schema na to pozwala
                 "url": r.get("url"),
-                "skills": ", ".join(sorted({s.strip() for s in skills_list if s})),
+                "skills": skills_csv,
                 "seniority": seniority,
             }
         )
@@ -149,15 +156,15 @@ def build_clean_rows(rows: List[Dict]) -> List[Dict]:
 
 
 def upsert_clean(engine: Engine, rows: List[Dict]):
-    """Czyścimy jobs_clean i wstawiamy świeże rekordy."""
+    """Czyści jobs_clean i wstawia świeże rekordy."""
     with engine.begin() as conn:
         conn.execute(delete(jobs_clean))
         if rows:
             conn.execute(insert(jobs_clean), rows)
 
-# -----------------------
+# -----------
 # Główny ETL
-# -----------------------
+# -----------
 
 def main():
     logger.info("Start ETL | DB_PATH=%s", DB_PATH)
