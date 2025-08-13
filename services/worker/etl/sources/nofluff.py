@@ -1,78 +1,31 @@
 # services/worker/etl/sources/nofluff.py
-"""
-NoFluffJobs source (portfolio-friendly).
-
-Próbuje pobrać ogłoszenia z internetu (API/HTML) — jeśli nie wyjdzie, zwraca
-zestaw DANYCH PRZYKŁADOWYCH (skalowalny), żeby pipeline (ETL→API→Dashboard)
-zawsze miał co wstawić do bazy i demo nie było puste.
-
-Zmiany:
-- DUŻO większa różnorodność firm (generator nazw zamiast krótkiej listy).
-- seniority dostępne już w RAW (zgadywane z tytułu).
-"""
 from __future__ import annotations
-import datetime as dt
+
+import os
 import re
-from typing import List, Dict, Optional
+import json
+import time
+import datetime as dt
+from typing import List, Dict, Optional, Iterable
 
-SOURCE_NAME = "NoFluffJobs(fallback)"
+import requests
 
-# kilka bazowych wpisów (żeby mieć „realnie” wyglądające przykłady)
-_BASE = [
-    ("Junior Data Engineer", "DataWorks", "Warszawa", "ETL, SQL, Python. Mile widziany Airflow i dbt.", "https://nofluffjobs.com/"),
-    ("ML Engineer (NLP)", "AI Labs", "Kraków", "NLP, scikit-learn, PyTorch, MLOps (Docker).", "https://nofluffjobs.com/"),
-    ("Data Scientist", "InsightX", "Gdańsk", "Modelowanie, walidacja, wizualizacje; Python, pandas, matplotlib.", "https://nofluffjobs.com/"),
-    ("Senior Data Engineer", "CloudWare", "Zdalnie", "Spark, Airflow, AWS/GCP, inżynieria danych w skali.", "https://nofluffjobs.com/"),
-    ("Junior AI Engineer", "VisionTech", "Wrocław", "Computer Vision, podstawy PyTorch, Docker, REST API.", "https://nofluffjobs.com/"),
-]
+SOURCE_NAME = "NoFluffJobs(HTML)"
 
-# stanowiska/tytuły i miasta – to może zostać listą (i tak łączymy je dowolnie)
-_EXTRA_TITLES = [
-    "Data Analyst", "Analytics Engineer", "BI Developer",
-    "MLOps Engineer", "Machine Learning Engineer",
-    "NLP Engineer", "Data Engineer", "Junior Data Analyst",
-    "Research Scientist", "AI Engineer", "Senior Data Scientist",
-    "Senior Machine Learning Engineer", "Junior BI Developer",
-    "Lead Data Engineer", "Principal ML Engineer",
-]
-_EXTRA_CITIES = [
-    "Warszawa", "Kraków", "Poznań", "Wrocław", "Gdańsk",
-    "Zdalnie", "Łódź", "Katowice", "Szczecin", "Rzeszów",
-]
+# Konfiguracja scrapera przez ENV (prosto, bez zależności):
+NFJ_COUNTRY = os.getenv("NFJ_COUNTRY", "pl").strip()          # "pl"
+NFJ_CATEGORIES = os.getenv("NFJ_CATEGORIES", "data,backend").split(",")
+NFJ_REMOTE = os.getenv("NFJ_REMOTE", "1") == "1"              # 1 => użyj też /remote/<cat>
+NFJ_PAGES = int(os.getenv("NFJ_PAGES", "5"))                  # ile stron listy na kategorię
+NFJ_DELAY = float(os.getenv("NFJ_DELAY", "0.8"))              # sekundy między requestami
 
-# — generator nazw firm (pula kombinacji >> liczba ogłoszeń) —
-_NAME_PRE = [
-    "Data","Cloud","Quantum","Vector","Nova","Blue","Deep","Bright","Core","Peak","Apex",
-    "Hyper","Neo","Alpha","Omega","Green","Silver","Golden","Urban","Prime","Next","Future",
-    "Proto","Pixel","Spark","Stream","Model","Graph","Tensor","Matrix","Signal","Insight",
-    "Vision","Logic","Numeric","Stat","Analytic","Bayes","Gradient","Kernel","Pattern",
-    "Crystal","Nimbus","Orbit","Turbo","Solid","Clear","Rapid","Bold","True","Meta",
-]
-_NAME_CORE = [
-    "Forge","Works","Labs","Flow","Metric","Nest","Mind","Smith","Nexus","Haven",
-    "Pulse","Shift","Loop","Bridge","Scope","Scale","Stack","Craft","Hub","Studio",
-    "Ops","Verse","Ray","Grid","Field","Point","Path","Beam","Core","Layer","Wave",
-    "Drift","Engine","Peak","Stack","Engine","Dynami","Synth","Quanta","Orbit","Factor",
-]
-_NAME_SUF = [
-    "AI","Analytics","Data","Systems","Solutions","Tech","Digital","Software",
-    "Intelligence","Networks","Group","Partners","Studio","Research","Platforms",
-]
+USER_AGENT = os.getenv(
+    "NFJ_UA",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome Safari"
+)
 
-def _company_name(i: int) -> str:
-    """
-    Deterministyczny generator nazw firm. Kombinacje ~ len(PRE)*len(CORE)*len(SUF)
-    → dziesiątki tysięcy unikatów. Po wyczerpaniu puli dodajemy sufiks liczbowy.
-    """
-    a = _NAME_PRE[i % len(_NAME_PRE)]
-    b = _NAME_CORE[(i * 7) % len(_NAME_CORE)]
-    c = _NAME_SUF[(i * 13) % len(_NAME_SUF)]
-    name = f"{a}{b} {c}"
-    combos = len(_NAME_PRE) * len(_NAME_CORE) * len(_NAME_SUF)
-    if i >= combos:
-        name += f" {i // combos + 2}"
-    return name
-
+# Heurystyki seniority
 _JUN = re.compile(r"\b(junior|intern|trainee|student|jr)\b", re.I)
 _SEN = re.compile(r"\b(senior|lead|principal|staff|expert|architect|sr)\b", re.I)
 _MID = re.compile(r"\b(mid|middle|regular)\b", re.I)
@@ -82,68 +35,177 @@ def _guess_seniority_from_title(title: str) -> str:
     if _JUN.search(t): return "Junior"
     if _SEN.search(t): return "Senior"
     if _MID.search(t): return "Mid"
-    return "Mid"  # brak jawnych sygnałów → Mid
+    return "Mid"
 
-def _samples(target: int) -> List[Dict]:
-    out: List[Dict] = []
-    today = dt.date.today().isoformat()
+# ---------- HTML helpers ----------
 
-    # bazowe 5 (z realnymi nazwami)
-    for i, (title, company, city, desc, url) in enumerate(_BASE, start=1):
-        out.append({
-            "id": f"nfj-{1000+i}",
-            "title": title,
-            "company": company,
-            "location": city,
-            "desc": desc,
-            "source": SOURCE_NAME,
-            "posted_at": today,
-            "url": url,
-            "seniority": _guess_seniority_from_title(title),
-        })
+_LIST_JOB_LINK_RE = re.compile(r'href="(/(?:en|pl)/job/[^"]+)"')
+_LIST_JOB_LINK_ABS_RE = re.compile(r'href="(https://nofluffjobs\.com/(?:en|pl)/job/[^"]+)"', re.I)
 
-    # generowane rekordy: TYLKO tytuł/city z list, firma z generatora (bez limitu)
-    idx = 1000 + len(out)
-    i = 0
-    while len(out) < target:
-        t = _EXTRA_TITLES[i % len(_EXTRA_TITLES)]
-        city = _EXTRA_CITIES[(i * 7) % len(_EXTRA_CITIES)]
-        company = _company_name(i)  # <— nieograniczona liczba firm
-        idx += 1
-        i += 1
-        out.append({
-            "id": f"nfj-{idx}",
-            "title": t,
-            "company": company,
-            "location": city,
-            "desc": f"{t} – Python, SQL, ETL/ML. Mile widziane: Airflow/dbt, Docker.",
-            "source": SOURCE_NAME,
-            "posted_at": today,
-            "url": "https://nofluffjobs.com/",
-            "seniority": _guess_seniority_from_title(t),
-        })
-    return out
+def _normalize_job_url(u: str) -> str:
+    if u.startswith("http"):
+        return u
+    return f"https://nofluffjobs.com{u}"
 
-def _try_fetch_online(limit: int = 50) -> Optional[List[Dict]]:
-    # Miejsce na prawdziwy fetch (na razie wyłączone, żeby demo zawsze działało)
-    return None
+def _listing_urls() -> Iterable[str]:
+    base = "https://nofluffjobs.com"
+    cats = [c.strip() for c in NFJ_CATEGORIES if c.strip()]
+    for cat in cats:
+        # /pl/<cat>?page=1..N
+        for p in range(1, NFJ_PAGES + 1):
+            yield f"{base}/{NFJ_COUNTRY}/{cat}?page={p}"
+        if NFJ_REMOTE:
+            for p in range(1, NFJ_PAGES + 1):
+                yield f"{base}/{NFJ_COUNTRY}/remote/{cat}?page={p}"
+
+def _extract_links_from_listing(html: str) -> List[str]:
+    # proste wyłuskanie linków do /pl/job/...
+    links = []
+    for m in _LIST_JOB_LINK_RE.finditer(html):
+        links.append(_normalize_job_url(m.group(1)))
+    for m in _LIST_JOB_LINK_ABS_RE.finditer(html):
+        links.append(_normalize_job_url(m.group(1)))
+    # unikalność + zachowanie kolejności
+    seen = set()
+    uniq = []
+    for u in links:
+        if u not in seen:
+            seen.add(u)
+            uniq.append(u)
+    return uniq
+
+def _extract_job_from_html(html: str, url: str) -> Dict:
+    # Szukamy bloków <script type="application/ld+json"> z JobPosting
+    job = None
+    for m in re.finditer(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, flags=re.S|re.I):
+        raw = m.group(1).strip()
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+
+        def pick(d):
+            nonlocal job
+            if isinstance(d, dict) and d.get("@type") == "JobPosting":
+                job = d
+
+        if isinstance(data, dict):
+            if data.get("@type") == "JobPosting":
+                job = data
+            elif "@graph" in data and isinstance(data["@graph"], list):
+                for d in data["@graph"]:
+                    pick(d)
+        elif isinstance(data, list):
+            for d in data:
+                pick(d)
+        if job:
+            break
+
+    title = ""
+    company = ""
+    location = ""
+    desc = ""
+    posted = None
+
+    if job:
+        title = job.get("title") or ""
+        # firma
+        hiring = job.get("hiringOrganization") or {}
+        if isinstance(hiring, dict):
+            company = hiring.get("name") or ""
+        # lokalizacja
+        locobj = job.get("jobLocation")
+        addr = {}
+        if isinstance(locobj, list) and locobj:
+            addr = locobj[0].get("address", {}) or {}
+        elif isinstance(locobj, dict):
+            addr = (locobj.get("address", {}) or {})
+        location = addr.get("addressLocality") or addr.get("addressRegion") or addr.get("addressCountry") or ""
+        # opis + data
+        desc = job.get("description") or ""
+        posted = job.get("datePosted") or job.get("validFrom")
+    else:
+        # awaryjnie: tytuł strony
+        mt = re.search(r"<title>(.*?)</title>", html, re.S|re.I)
+        if mt:
+            title = mt.group(1).split("|")[0].strip()
+
+    return {
+        "id": url,
+        "title": title,
+        "company": company,
+        "location": location,
+        "desc": desc,
+        "source": SOURCE_NAME,
+        "posted_at": posted,
+        "url": url,
+        "seniority": _guess_seniority_from_title(title),
+    }
+
+def _safe_get(session: requests.Session, url: str, timeout: int = 30) -> Optional[str]:
+    try:
+        r = session.get(url, timeout=timeout)
+        if r.status_code != 200:
+            return None
+        return r.text
+    except Exception:
+        return None
+
+# ---------- Public API ----------
 
 def fetch_jobs(limit: int = 50) -> List[Dict]:
     """
-    Zwraca do 'limit' rekordów (bez sztucznego limitu 100).
-    Dla bezpieczeństwa ograniczamy do max 5000, żeby nie wyprodukować zbyt wielkiej bazy.
+    Realne oferty z NoFluffJobs przez HTML (bez Apify).
+    - przechodzi po stronach list (kilka kategorii, tryb remote),
+    - wyciąga linki do ogłoszeń,
+    - z podstron parsuje JSON-LD JobPosting.
+
+    Uwaga: serwis bywa dynamiczny (SPA). Ten kod nie gwarantuje 100% skuteczności,
+    ale działa bezpłatnie i minimalnie obciąża stronę (NFJ_DELAY).
     """
-    limit = max(5, min(5000, int(limit)))
-    online = _try_fetch_online(limit=limit)
-    if online:
-        out = []
-        for r in online[:limit]:
-            rr = dict(r)
-            rr.setdefault("source", SOURCE_NAME)
-            rr.setdefault("posted_at", dt.date.today().isoformat())
-            rr.setdefault("seniority", _guess_seniority_from_title(rr.get("title","")))
-            # jeśli online nie podało company — wygeneruj
-            rr.setdefault("company", _company_name(len(out)))
-            out.append(rr)
-        return out
-    return _samples(target=limit)
+    limit = max(1, min(5000, int(limit)))
+    sess = requests.Session()
+    sess.headers.update({
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "pl,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Cache-Control": "no-cache",
+    })
+
+    out: List[Dict] = []
+    seen = set()
+
+    for lst_url in _listing_urls():
+        if len(out) >= limit:
+            break
+        html = _safe_get(sess, lst_url)
+        time.sleep(NFJ_DELAY)
+        if not html:
+            continue
+
+        links = _extract_links_from_listing(html)
+        for job_url in links:
+            if len(out) >= limit:
+                break
+            if job_url in seen:
+                continue
+            seen.add(job_url)
+
+            jhtml = _safe_get(sess, job_url)
+            time.sleep(NFJ_DELAY)
+            if not jhtml:
+                continue
+
+            rec = _extract_job_from_html(jhtml, job_url)
+            # minimalne sanity – potrzebujemy chociaż tytułu i firmy
+            if not rec.get("title"):
+                continue
+            out.append(rec)
+
+    # brak wyników? Zwróć pustą listę (ETL ma fallback w innych źródłach, jeśli dodasz)
+    today = dt.date.today().isoformat()
+    for r in out:
+        r.setdefault("posted_at", today)
+        r.setdefault("source", SOURCE_NAME)
+
+    return out[:limit]
