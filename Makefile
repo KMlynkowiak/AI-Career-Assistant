@@ -12,7 +12,7 @@ dev: venv
 	$(PIP) install -r services/dashboard/requirements.txt
 
 etl:
-	DB_PATH=data/ai_jobs.db $(RUN) services/worker/etl/main.py
+	DB_PATH=data/ai_jobs.db $(RUN) -m services.worker.etl.main
 
 api:
 	DB_PATH=data/ai_jobs.db $(RUN) services/api/app.py
