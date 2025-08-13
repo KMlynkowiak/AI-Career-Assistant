@@ -1,7 +1,8 @@
 PY?=python3
 VENV=.venv
-PIP=$(VENV)/bin/pip
-RUN=$(VENV)/bin/python
+PIP=$(VENV)/Scripts/pip.exe
+RUN=$(VENV)/Scripts/python.exe
+
 
 venv:
 	$(PY) -m venv $(VENV)

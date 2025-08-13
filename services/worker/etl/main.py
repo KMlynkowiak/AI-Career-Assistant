@@ -1,79 +1,136 @@
 # services/worker/etl/main.py
 import os
+import logging
+from typing import List, Dict
+
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, insert, delete, text
-from schema import metadata, jobs_table, jobs_clean
-from dedup import simple_dedup
-from nlp import extract_skills, infer_seniority
+from sqlalchemy.engine import Engine
 
-from sources.nofluff import fetch_jobs as fetch_nfj
-from sources.jj_apify import fetch_jobs as fetch_jj
+# Lokalny import struktur i narzędzi w projekcie
+# (pliki już są w repo)
+from services.worker.etl.schema import metadata, jobs_table, jobs_clean
+from services.worker.etl.dedup import simple_dedup
+from services.worker.etl.nlp import extract_skills, infer_seniority
 
+# Źródła ogłoszeń
+from services.worker.etl.sources.nofluff import fetch_jobs as fetch_nfj
+from services.worker.etl.sources.jj_apify import fetch_jobs as fetch_jj
+
+# -----------------------
+# Konfiguracja i logging
+# -----------------------
 load_dotenv()
 DB_PATH = os.getenv("DB_PATH", "data/ai_jobs.db")
+NFJ_LIMIT = int(os.getenv("NFJ_LIMIT", "200"))
+JJ_LIMIT = int(os.getenv("JJ_LIMIT", "200"))
 
-def get_engine():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    return create_engine(f"sqlite:///{DB_PATH}", echo=False)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("etl")
 
-def ensure_tables(engine):
-    metadata.create_all(engine)
 
-def ingest_raw(engine):
-    print("[ETL] fetching from NoFluffJobs...")
-    nfj = fetch_nfj(limit=200, query="data OR python OR sql")
-    print(f"[ETL] NFJ: {len(nfj)}")
+def get_engine() -> Engine:
+    # sqlite:///relative_path
+    uri = f"sqlite:///{DB_PATH}"
+    engine = create_engine(uri, future=True)
+    return engine
 
-    print("[ETL] fetching from JustJoinIT (Apify)...")
-    jj = fetch_jj(limit=200, query="data OR python OR sql")
-    print(f"[ETL] JJ: {len(jj)}")
 
-    data = nfj + jj
-    print(f"[ETL] total before dedup: {len(data)}")
-    # dedup po id; jeśli brak id, dedup po (title,company)
-    data = simple_dedup(data, key="id") or data
-    seen = set()
-    merged = []
-    for d in data:
-        k = (d["title"].lower(), d["company"].lower())
-        if k in seen: 
-            continue
-        seen.add(k)
-        merged.append(d)
-    print(f"[ETL] total after dedup:  {len(merged)}")
-
+def upsert_raw(engine: Engine, rows: List[Dict]):
+    """Wrzuca rekordy do tabeli surowej (jobs_table).
+    Prosto: czyścimy tabelę i wstawiamy od nowa (dla demo/portfolio)."""
     with engine.begin() as conn:
         conn.execute(delete(jobs_table))
-        for row in merged:
-            conn.execute(insert(jobs_table).values(**row))
-    return len(merged)
+        if rows:
+            conn.execute(insert(jobs_table), rows)
 
-def transform_clean(engine):
+
+def build_clean_rows(rows: List[Dict]) -> List[Dict]:
+    """Wzbogacanie NLP + normalizacja pod jobs_clean."""
+    out = []
+    for r in rows:
+        desc = r.get("desc") or r.get("description") or ""
+        skills_list = extract_skills(desc) or []
+        seniority = infer_seniority(f"{r.get('title','')} {desc}") or None
+
+        out.append(
+            {
+                "id": r.get("id"),
+                "title": r.get("title"),
+                "company": r.get("company"),
+                "location": r.get("location"),
+                "desc": desc,
+                "source": r.get("source"),
+                "posted_at": r.get("posted_at"),
+                "url": r.get("url"),
+                "skills": ", ".join(sorted(set([s.strip() for s in skills_list if s]))),
+                "seniority": seniority,
+            }
+        )
+    return out
+
+
+def upsert_clean(engine: Engine, rows: List[Dict]):
+    """Wrzuca rekordy do tabeli przetworzonej (jobs_clean)."""
     with engine.begin() as conn:
-        rows = conn.execute(text(
-            "SELECT id,title,company,location,description,source FROM jobs_raw"
-        )).mappings().all()
         conn.execute(delete(jobs_clean))
-        for r in rows:
-            # skille z naszego prostego ekstraktora
-            skills = extract_skills(r["description"] or "")
-            # seniority: jeśli nie ma od źródła, spróbuj zgadnąć z tytułu/opisu
-            guessed = infer_seniority(f"{r['title']} {r['description'] or ''}")
-            conn.execute(insert(jobs_clean).values(
-                id=r["id"], title=r["title"], company=r["company"],
-                location=r["location"],
-                skills=",".join(skills),
-                seniority=guessed,
-                tech_stack=",".join(skills),
-                source=r["source"]
-            ))
+        if rows:
+            conn.execute(insert(jobs_clean), rows)
+
 
 def main():
+    logger.info("Start ETL | DB_PATH=%s", DB_PATH)
     engine = get_engine()
-    ensure_tables(engine)
-    count = ingest_raw(engine)
-    transform_clean(engine)
-    print(f"ETL done. Loaded {count} rows into jobs_clean at {DB_PATH}")
+
+    # Tworzymy schemat jeśli brak
+    metadata.create_all(engine)
+    logger.info("Połączono z bazą i upewniono się, że schemat istnieje")
+
+    # 1) Extract
+    logger.info("Pobieram oferty: NoFluffJobs (limit=%d) + JustJoinIT/Apify (limit=%d)", NFJ_LIMIT, JJ_LIMIT)
+    nfj = fetch_nfj(limit=NFJ_LIMIT) or []
+    logger.info("NFJ: pobrano %d ofert", len(nfj))
+
+    # JJ via Apify może wymagać tokena; jeśli nie ma – zrób pustą listę i zaloguj
+    try:
+        jj = fetch_jj(limit=JJ_LIMIT) or []
+        logger.info("JJ: pobrano %d ofert", len(jj))
+    except Exception as e:
+        logger.warning("JJ (Apify) pominięte: %s", e)
+        jj = []
+
+    rows = nfj + jj
+    logger.info("Razem surowych rekordów: %d", len(rows))
+
+    # 2) Dedup
+    rows_dedup = simple_dedup(rows, key="id")
+    logger.info("Po deduplikacji: %d (usunięto %d)", len(rows_dedup), len(rows) - len(rows_dedup))
+
+    # 3) Load RAW
+    upsert_raw(engine, rows_dedup)
+    logger.info("Zapisano %d rekordów do jobs_table", len(rows_dedup))
+
+    # 4) Transform + NLP
+    clean_rows = build_clean_rows(rows_dedup)
+    logger.info("Wzbogacono NLP (skills/seniority) dla %d rekordów", len(clean_rows))
+
+    # 5) Load CLEAN
+    upsert_clean(engine, clean_rows)
+    logger.info("Zapisano %d rekordów do jobs_clean", len(clean_rows))
+
+    # 6) Kilka prostych metryk do logów
+    with engine.begin() as conn:
+        rc = conn.execute(text("SELECT COUNT(*) FROM jobs_clean")).scalar_one()
+        sc = conn.execute(text("SELECT COUNT(DISTINCT company) FROM jobs_clean")).scalar_one()
+    logger.info("Metryki: jobs_clean=%s, firmy=%s", rc, sc)
+
+    logger.info("ETL zakończony sukcesem")
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
