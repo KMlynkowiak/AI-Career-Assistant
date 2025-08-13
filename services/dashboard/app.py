@@ -1,90 +1,83 @@
+# services/dashboard/app.py
 import os
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
-# Altair opcjonalnie (fallback do st.bar_chart)
-HAS_ALTAIR = True
-try:
-    import altair as alt  # type: ignore
-except Exception:
-    HAS_ALTAIR = False
+# --- Ustawienia strony i drobny cleanup UI ---
+st.set_page_config(page_title="Jobs – Minimal", layout="centered")
+st.markdown(
+    """
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    .block-container {padding-top: 2rem; padding-bottom: 2rem;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
+# --- Baza ---
 DB_PATH = os.getenv("DB_PATH", "data/ai_jobs.db")
-engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
+engine = create_engine(f"sqlite:///{DB_PATH}", future=True)
 
-st.set_page_config(page_title="AI Career Assistant", layout="wide")
+def search_jobs(q: str | None, location: str | None, seniority: str | None, limit: int = 300) -> pd.DataFrame:
+    """
+    Proste wyszukiwanie:
+    - q          -> tytuł (contains, case-insensitive)
+    - location   -> lokalizacja (contains, case-insensitive)
+    - seniority  -> exact (Junior/Mid/Senior, case-insensitive; puste = brak filtra)
+    Zwraca 4 kolumny: title, seniority, location, company
+    """
+    sql = """
+        SELECT title, seniority, location, company
+        FROM jobs_clean
+        WHERE 1=1
+    """
+    params: dict[str, str | int] = {}
 
-@st.cache_data
-def load_jobs():
-    try:
-        return pd.read_sql("SELECT * FROM jobs_clean", engine)
-    except Exception:
-        return pd.DataFrame()
+    if q:
+        sql += " AND lower(title) LIKE :q "
+        params["q"] = f"%{q.lower().strip()}%"
 
-df = load_jobs()
+    if location:
+        sql += " AND lower(location) LIKE :loc "
+        params["loc"] = f"%{location.lower().strip()}%"
 
-st.title("AI Career & Job Market – Dashboard")
+    if seniority:
+        sql += " AND lower(seniority) = :sen "
+        params["sen"] = seniority.lower().strip()
+
+    sql += " ORDER BY rowid DESC LIMIT :limit "
+    params["limit"] = int(limit)
+
+    with engine.begin() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+
+    df = pd.DataFrame(rows, columns=["title", "seniority", "location", "company"])
+    return df
+
+
+# --- UI (minimal) ---
+st.title("🔎 Jobs – Minimal search")
+
+col1, col2, col3 = st.columns([1, 1, 1])
+with col1:
+    location_in = st.text_input("Lokalizacja", placeholder="np. Warszawa / wro / zdalnie", help="Filtrowanie zawiera, bez rozróżniania wielkości liter.")
+with col2:
+    seniority_in = st.text_input("Seniority", placeholder="Junior / Mid / Senior", help="Wpisz dokładnie Junior, Mid lub Senior (bez rozróżniania wielkości liter).")
+with col3:
+    title_in = st.text_input("Tytuł pracy", placeholder="np. Data", help="Np. Data → znajdzie Data Engineer / Data Scientist itp.")
+
+# Wyniki
+df = search_jobs(q=title_in or None, location=location_in or None, seniority=seniority_in or None)
+
 st.caption(f"Baza: {DB_PATH}")
+st.write(f"Wyniki: **{len(df)}**")
 
-# Szybkie metryki
-st.subheader("Szybkie metryki")
-c1, c2, c3 = st.columns(3)
-c1.metric("Liczba ogłoszeń", len(df))
-c2.metric("Liczba firm", int(df["company"].nunique()) if "company" in df.columns and not df.empty else 0)
-c3.metric("Źródła", int(df["source"].nunique()) if "source" in df.columns and not df.empty else 0)
-
-st.divider()
-
-# Filtry
-st.subheader("Filtry")
-colf1, colf2, colf3 = st.columns([1,1,2])
-sources = sorted(df["source"].dropna().unique().tolist()) if "source" in df.columns else []
-source_pick = colf1.multiselect("Źródło", sources, default=sources)
-cities = sorted(df["location"].dropna().unique().tolist()) if "location" in df.columns else []
-city_pick = colf2.multiselect("Miasto", cities, default=cities)
-q = colf3.text_input("Szukaj w tytule/opisie", "")
-
-df_f = df.copy()
-if source_pick:
-    df_f = df_f[df_f["source"].isin(source_pick)]
-if city_pick:
-    df_f = df_f[df_f["location"].isin(city_pick)]
-if q.strip():
-    ql = q.lower()
-    def _m(s):
-        s = str(s or "")
-        return ql in s.lower()
-    df_f = df_f[df_f["title"].apply(_m) | df_f["desc"].apply(_m)]
-
-st.write(f"Wynik po filtrach: **{len(df_f)}** rekordów")
-st.dataframe(df_f.head(50), use_container_width=True)
-
-st.subheader("Top umiejętności")
-
-def draw_skills_chart(skills_df: pd.DataFrame):
-    if HAS_ALTAIR:
-        chart = alt.Chart(skills_df.head(20)).mark_bar().encode(
-            x="count:Q",
-            y=alt.Y("skill:N", sort='-x'),
-            tooltip=["skill", "count"]
-        )
-        st.altair_chart(chart, use_container_width=True)
-    else:
-        st.bar_chart(skills_df.set_index("skill").head(20))
-
-if not df_f.empty and "skills" in df_f.columns:
-    from collections import Counter
-    c = Counter()
-    for s in df_f["skills"].dropna():
-        for sk in s.split(","):
-            sk = sk.strip()
-            if sk:
-                c[sk] += 1
-    skills_df = pd.DataFrame([{"skill": k, "count": v} for k, v in c.items()]).sort_values("count", ascending=False)
-    if not skills_df.empty:
-        draw_skills_chart(skills_df)
-    else:
-        st.info("Brak danych o umiejętnościach.")
+if df.empty:
+    st.info("Brak rekordów dla podanych filtrów. Spróbuj zostawić pola puste lub wpisz krótszy fragment (np. 'wro', 'data').")
 else:
-    st.info("Brak danych o umiejętnościach (uruchom ETL).")
+    # schludne nagłówki po PL
+    df = df.rename(columns={"title": "Tytuł", "seniority": "Seniority", "location": "Lokalizacja", "company": "Firma"})
+    st.dataframe(df, use_container_width=True, hide_index=True)
