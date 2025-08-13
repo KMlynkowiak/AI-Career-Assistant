@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import logging
+import datetime as dt
+from pathlib import Path
 from typing import List, Dict, Optional
 
 from dotenv import load_dotenv
@@ -25,6 +28,7 @@ load_dotenv()
 DB_PATH = os.getenv("DB_PATH", "data/ai_jobs.db")
 NFJ_LIMIT = int(os.getenv("NFJ_LIMIT", "200"))
 JJ_LIMIT = int(os.getenv("JJ_LIMIT", "200"))
+RAW_DUMP = os.getenv("RAW_DUMP") == "1"  # <- włącz zapisy surowych plików
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,7 +66,7 @@ def normalize_source_seniority(value: Optional[str]) -> Optional[str]:
       - Jeśli nic nie pasuje → None (spróbuje tytuł).
     """
     if value is None:
-        return None  # <— KLUCZOWA ZMIANA: wcześniej było 'Mid'
+        return None
     v = str(value).strip().lower()
     if v in {"", "brak", "unspecified", "unknown", "none", "n/a", "na"}:
         return "Mid"
@@ -115,6 +119,20 @@ def choose_seniority(raw_sen: Optional[str], title: str, desc: str) -> str:
     return "Mid"
 
 # -----------------------
+# RAW dump helper (JSONL)
+# -----------------------
+
+def dump_jsonl(rows: List[Dict] | None, name: str):
+    """Zapisz listę dictów do data/raw/<name>_YYYYmmdd_HHMMSS.jsonl"""
+    Path("data/raw").mkdir(parents=True, exist_ok=True)
+    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = Path(f"data/raw/{name}_{ts}.jsonl")
+    with path.open("w", encoding="utf-8") as f:
+        for r in rows or []:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    logger.info("RAW dump -> %s (%d rekordów)", path, len(rows or []))
+
+# -----------------------
 # Transform + Load CLEAN
 # -----------------------
 
@@ -165,6 +183,7 @@ def main():
     logger.info("Start ETL | DB_PATH=%s", DB_PATH)
     engine = get_engine()
 
+    # Schemat
     metadata.create_all(engine)
     logger.info("Połączono z bazą i upewniono się, że schemat istnieje")
 
@@ -175,10 +194,14 @@ def main():
     )
     nfj = fetch_nfj(limit=NFJ_LIMIT) or []
     logger.info("NFJ: pobrano %d ofert", len(nfj))
+    if RAW_DUMP:
+        dump_jsonl(nfj, "nfj")
 
     try:
         jj = fetch_jj(limit=JJ_LIMIT) or []
         logger.info("JJ: pobrano %d ofert", len(jj))
+        if RAW_DUMP:
+            dump_jsonl(jj, "jj")
     except Exception as e:
         logger.warning("JJ (Apify) pominięte: %s", e)
         jj = []
