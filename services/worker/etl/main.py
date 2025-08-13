@@ -43,13 +43,26 @@ def upsert_raw(engine: Engine, rows: List[Dict]):
             conn.execute(insert(jobs_table), rows)
 
 
+def _default_mid(sen):
+    """Jeśli brak/nieokreślone seniority → 'Mid'."""
+    if not sen:
+        return "Mid"
+    s = str(sen).strip().lower()
+    if s in {"unspecified", "unknown", "none", "n/a", "na", ""}:
+        return "Mid"
+    return sen
+
+
 def build_clean_rows(rows: List[Dict]) -> List[Dict]:
     """Wzbogacanie NLP + normalizacja pod jobs_clean."""
     out = []
     for r in rows:
         desc = r.get("desc") or r.get("description") or ""
         skills_list = extract_skills(desc) or []
+        # Domyślnie MID, jeśli NLP nic nie znalazł:
         seniority = infer_seniority(f"{r.get('title','')} {desc}") or None
+        seniority = _default_mid(seniority)
+
         out.append(
             {
                 "id": r.get("id"),
@@ -86,8 +99,7 @@ def main():
     # 1) Extract
     logger.info(
         "Pobieram oferty: NoFluffJobs (limit=%d) + JustJoinIT/Apify (limit=%d)",
-        NFJ_LIMIT,
-        JJ_LIMIT,
+        NFJ_LIMIT, JJ_LIMIT,
     )
     nfj = fetch_nfj(limit=NFJ_LIMIT) or []
     logger.info("NFJ: pobrano %d ofert", len(nfj))

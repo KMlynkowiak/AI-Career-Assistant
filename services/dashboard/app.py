@@ -22,7 +22,7 @@ DB_PATH = os.getenv("DB_PATH", "data/ai_jobs.db")
 def query_jobs(q=None, loc=None, sen=None, limit=300):
     """
     Szukanie:
-      - q  -> tytuł (LIKE %fragment%, case-insensitive)
+      - q   -> tytuł (LIKE %fragment%, case-insensitive)
       - loc -> lokalizacja (LIKE %fragment%, case-insensitive)
       - sen -> exact 'junior/mid/senior' (case-insensitive)
     Zwraca: title, seniority, location, company
@@ -46,7 +46,7 @@ def query_jobs(q=None, loc=None, sen=None, limit=300):
         sql += " AND lower(seniority) = :sen "
         params["sen"] = sen.lower().strip()
 
-    # ✅ Bez 'posted_at' — wspiera istniejącą schemę
+    # Brak wymagania na kolumnę posted_at — wspiera istniejącą bazę
     sql += " ORDER BY rowid DESC LIMIT :limit "
     params["limit"] = int(limit)
 
@@ -55,30 +55,42 @@ def query_jobs(q=None, loc=None, sen=None, limit=300):
         rows = conn.execute(sql, params).fetchall()
     return rows
 
-# — UI —
+# — UI: formularz (nic nie pokazujemy, dopóki nie klikniesz 'Szukaj') —
 st.title("🔎 Jobs – Minimal search")
-c1, c2, c3 = st.columns(3)
-with c1:
-    loc_in = st.text_input("Lokalizacja", placeholder="np. warsz / wro / zdalnie")
-with c2:
-    sen_in = st.text_input("Seniority", placeholder="Junior / Mid / Senior")
-with c3:
-    ttl_in = st.text_input("Tytuł pracy", placeholder="np. Data")
 
-rows = query_jobs(q=ttl_in or None, loc=loc_in or None, sen=sen_in or None)
+with st.form("search"):
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        loc_in = st.text_input("Lokalizacja", placeholder="np. warsz / wro / zdalnie")
+    with c2:
+        sen_in = st.text_input("Seniority", placeholder="Junior / Mid / Senior")
+    with c3:
+        ttl_in = st.text_input("Tytuł pracy", placeholder="np. Data")
+    submitted = st.form_submit_button("Szukaj")
+
 st.caption(f"Baza: {DB_PATH}")
-st.write(f"Wyniki: **{len(rows)}**")
 
-if not rows:
-    st.info("Brak rekordów. Zostaw pola puste albo użyj krótszego fragmentu (np. 'data', 'wro').")
+if not submitted:
+    st.info("Uzupełnij dowolne pole i kliknij **Szukaj** – wtedy pokażę wyniki.")
 else:
-    header = ["Tytuł", "Seniority", "Lokalizacja", "Firma"]
-    body = "".join(
-        f"<tr><td>{html.escape(r['title'] or '')}</td>"
-        f"<td>{html.escape(r['seniority'] or '')}</td>"
-        f"<td>{html.escape(r['location'] or '')}</td>"
-        f"<td>{html.escape(r['company'] or '')}</td></tr>"
-        for r in rows
-    )
-    table = "<table class='mini'><thead><tr>" + "".join(f"<th>{h}</th>" for h in header) + "</tr></thead><tbody>" + body + "</tbody></table>"
-    st.markdown(table, unsafe_allow_html=True)
+    rows = query_jobs(q=ttl_in or None, loc=loc_in or None, sen=sen_in or None)
+    st.write(f"Wyniki: **{len(rows)}**")
+    if not rows:
+        st.warning("Brak rekordów. Spróbuj krótszego fragmentu (np. 'data', 'wro').")
+    else:
+        header = ["Tytuł", "Seniority", "Lokalizacja", "Firma"]
+        body = "".join(
+            f"<tr><td>{html.escape(r['title'] or '')}</td>"
+            f"<td>{html.escape(r['seniority'] or '')}</td>"
+            f"<td>{html.escape(r['location'] or '')}</td>"
+            f"<td>{html.escape(r['company'] or '')}</td></tr>"
+            for r in rows
+        )
+        table = (
+            "<table class='mini'><thead><tr>"
+            + "".join(f"<th>{h}</th>" for h in header)
+            + "</tr></thead><tbody>"
+            + body
+            + "</tbody></table>"
+        )
+        st.markdown(table, unsafe_allow_html=True)
