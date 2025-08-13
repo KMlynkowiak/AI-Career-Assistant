@@ -220,6 +220,8 @@ def main():
     # 4) Transform + klasyfikacja seniority wg priorytetów
     clean_rows = build_clean_rows(rows_dedup)
     logger.info("Wzbogacono NLP (skills/seniority) dla %d rekordów", len(clean_rows))
+    if RAW_DUMP:
+        dump_jsonl(clean_rows, "clean")  # <-- finalna klasyfikacja (jobs_clean)
 
     # 5) Load CLEAN
     upsert_clean(engine, clean_rows)
