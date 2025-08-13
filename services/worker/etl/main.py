@@ -7,13 +7,10 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, insert, delete, text
 from sqlalchemy.engine import Engine
 
-# Lokalny import struktur i narzędzi w projekcie
-# (pliki już są w repo)
 from services.worker.etl.schema import metadata, jobs_table, jobs_clean
 from services.worker.etl.dedup import simple_dedup
 from services.worker.etl.nlp import extract_skills, infer_seniority
 
-# Źródła ogłoszeń
 from services.worker.etl.sources.nofluff import fetch_jobs as fetch_nfj
 from services.worker.etl.sources.jj_apify import fetch_jobs as fetch_jj
 
@@ -33,15 +30,13 @@ logger = logging.getLogger("etl")
 
 
 def get_engine() -> Engine:
-    # sqlite:///relative_path
     uri = f"sqlite:///{DB_PATH}"
     engine = create_engine(uri, future=True)
     return engine
 
 
 def upsert_raw(engine: Engine, rows: List[Dict]):
-    """Wrzuca rekordy do tabeli surowej (jobs_table).
-    Prosto: czyścimy tabelę i wstawiamy od nowa (dla demo/portfolio)."""
+    """Czyścimy jobs_table i wstawiamy świeże rekordy (demo/portfolio)."""
     with engine.begin() as conn:
         conn.execute(delete(jobs_table))
         if rows:
@@ -55,7 +50,6 @@ def build_clean_rows(rows: List[Dict]) -> List[Dict]:
         desc = r.get("desc") or r.get("description") or ""
         skills_list = extract_skills(desc) or []
         seniority = infer_seniority(f"{r.get('title','')} {desc}") or None
-
         out.append(
             {
                 "id": r.get("id"),
@@ -74,7 +68,7 @@ def build_clean_rows(rows: List[Dict]) -> List[Dict]:
 
 
 def upsert_clean(engine: Engine, rows: List[Dict]):
-    """Wrzuca rekordy do tabeli przetworzonej (jobs_clean)."""
+    """Czyścimy jobs_clean i wstawiamy świeże rekordy."""
     with engine.begin() as conn:
         conn.execute(delete(jobs_clean))
         if rows:
@@ -85,16 +79,19 @@ def main():
     logger.info("Start ETL | DB_PATH=%s", DB_PATH)
     engine = get_engine()
 
-    # Tworzymy schemat jeśli brak
+    # Schemat
     metadata.create_all(engine)
     logger.info("Połączono z bazą i upewniono się, że schemat istnieje")
 
     # 1) Extract
-    logger.info("Pobieram oferty: NoFluffJobs (limit=%d) + JustJoinIT/Apify (limit=%d)", NFJ_LIMIT, JJ_LIMIT)
+    logger.info(
+        "Pobieram oferty: NoFluffJobs (limit=%d) + JustJoinIT/Apify (limit=%d)",
+        NFJ_LIMIT,
+        JJ_LIMIT,
+    )
     nfj = fetch_nfj(limit=NFJ_LIMIT) or []
     logger.info("NFJ: pobrano %d ofert", len(nfj))
 
-    # JJ via Apify może wymagać tokena; jeśli nie ma – zrób pustą listę i zaloguj
     try:
         jj = fetch_jj(limit=JJ_LIMIT) or []
         logger.info("JJ: pobrano %d ofert", len(jj))
@@ -121,7 +118,7 @@ def main():
     upsert_clean(engine, clean_rows)
     logger.info("Zapisano %d rekordów do jobs_clean", len(clean_rows))
 
-    # 6) Kilka prostych metryk do logów
+    # 6) Metryki
     with engine.begin() as conn:
         rc = conn.execute(text("SELECT COUNT(*) FROM jobs_clean")).scalar_one()
         sc = conn.execute(text("SELECT COUNT(DISTINCT company) FROM jobs_clean")).scalar_one()
@@ -134,3 +131,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
+        logger.exception("ETL failed")
+        raise
