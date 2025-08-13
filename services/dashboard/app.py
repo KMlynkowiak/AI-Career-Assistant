@@ -1,8 +1,14 @@
 import os
 import pandas as pd
-import altair as alt
 import streamlit as st
 from sqlalchemy import create_engine
+
+# Altair opcjonalnie (fallback do st.bar_chart)
+HAS_ALTAIR = True
+try:
+    import altair as alt  # type: ignore
+except Exception:
+    HAS_ALTAIR = False
 
 DB_PATH = os.getenv("DB_PATH", "data/ai_jobs.db")
 engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
@@ -55,6 +61,18 @@ st.write(f"Wynik po filtrach: **{len(df_f)}** rekordów")
 st.dataframe(df_f.head(50), use_container_width=True)
 
 st.subheader("Top umiejętności")
+
+def draw_skills_chart(skills_df: pd.DataFrame):
+    if HAS_ALTAIR:
+        chart = alt.Chart(skills_df.head(20)).mark_bar().encode(
+            x="count:Q",
+            y=alt.Y("skill:N", sort='-x'),
+            tooltip=["skill", "count"]
+        )
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.bar_chart(skills_df.set_index("skill").head(20))
+
 if not df_f.empty and "skills" in df_f.columns:
     from collections import Counter
     c = Counter()
@@ -65,12 +83,7 @@ if not df_f.empty and "skills" in df_f.columns:
                 c[sk] += 1
     skills_df = pd.DataFrame([{"skill": k, "count": v} for k, v in c.items()]).sort_values("count", ascending=False)
     if not skills_df.empty:
-        chart = alt.Chart(skills_df.head(20)).mark_bar().encode(
-            x="count:Q",
-            y=alt.Y("skill:N", sort='-x'),
-            tooltip=["skill", "count"]
-        )
-        st.altair_chart(chart, use_container_width=True)
+        draw_skills_chart(skills_df)
     else:
         st.info("Brak danych o umiejętnościach.")
 else:
