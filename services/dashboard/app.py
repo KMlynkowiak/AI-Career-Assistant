@@ -20,63 +20,53 @@ st.markdown(
 DB_PATH = os.getenv("DB_PATH", "data/ai_jobs.db")
 
 def _norm(s: str | None) -> str | None:
-    """Zwraca znormalizowany string lub None, jeśli puste."""
-    if not s:
-        return None
+    if not s: return None
     s = s.strip()
     return s if s else None
 
 def _norm_seniority(s: str | None) -> str | None:
-    """Lekka normalizacja: 'jun'->Junior, 'mid'->Mid, 'sen'->Senior."""
     s = _norm(s)
-    if not s:
-        return None
+    if not s: return None
     low = s.lower()
-    if low.startswith("jun"):
-        return "Junior"
-    if low.startswith("mid") or low == "m":
-        return "Mid"
-    if low.startswith("sen"):
-        return "Senior"
-    # jeżeli wpiszesz coś innego, filtr zadziała jak exact na to co wpisano
-    return s
+    if low.startswith("jun"): return "Junior"
+    if low.startswith("mid") or low == "m": return "Mid"
+    if low.startswith("sen"): return "Senior"
+    return s  # inne wartości traktujemy jako exact
 
-def query_jobs(q=None, loc=None, sen=None, limit: int = 1000):
-    """
-    Puste = brak filtra:
-      - q   -> title LIKE %q% (case-insensitive)
-      - loc -> location LIKE %loc% (case-insensitive)
-      - sen -> seniority = sen (case-insensitive, po lekkiej normalizacji)
-    Zwraca: title, seniority, location, company
-    """
-    sql = """
-        SELECT title, seniority, location, company
-        FROM jobs_clean
-        WHERE 1=1
-    """
+def _where_and_params(q=None, loc=None, sen=None):
+    sql = " WHERE 1=1 "
     params = {}
-
     if q := _norm(q):
         sql += " AND lower(title) LIKE :q "
         params["q"] = f"%{q.lower()}%"
-
     if loc := _norm(loc):
         sql += " AND lower(location) LIKE :loc "
         params["loc"] = f"%{loc.lower()}%"
-
     if sen := _norm_seniority(sen):
         sql += " AND lower(seniority) = :sen "
         params["sen"] = sen.lower()
+    return sql, params
 
-    sql += " ORDER BY rowid DESC LIMIT :limit "
+def count_jobs(q=None, loc=None, sen=None) -> int:
+    where_sql, params = _where_and_params(q, loc, sen)
+    sql = "SELECT COUNT(*) FROM jobs_clean" + where_sql
+    with sqlite3.connect(DB_PATH) as conn:
+        return int(conn.execute(sql, params).fetchone()[0])
+
+def query_jobs(q=None, loc=None, sen=None, limit: int = 200):
+    where_sql, params = _where_and_params(q, loc, sen)
+    sql = (
+        "SELECT title, seniority, location, company "
+        "FROM jobs_clean " + where_sql +
+        " ORDER BY rowid DESC LIMIT :limit "
+    )
     params["limit"] = int(limit)
-
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(sql, params).fetchall()
     return rows
 
-# — UI: formularz; nic nie pokazujemy dopóki nie klikniesz "Szukaj" —
+# — UI: formularz; wyniki dopiero po "Szukaj" —
 st.title("🔎 Jobs – Minimal search")
 
 with st.form("search"):
@@ -87,15 +77,17 @@ with st.form("search"):
         sen_in = st.text_input("Seniority", placeholder="Junior / Mid / Senior (puste = wszystkie)")
     with c3:
         ttl_in = st.text_input("Tytuł pracy", placeholder="np. Data (puste = wszystkie)")
+    limit_in = st.number_input("Limit wyników", min_value=10, max_value=5000, value=200, step=10)
     submitted = st.form_submit_button("Szukaj")
 
 st.caption(f"Baza: {DB_PATH}")
 
 if not submitted:
-    st.info("Wpisz filtry (lub zostaw puste) i kliknij **Szukaj**.")
+    st.info("Wpisz filtry (lub zostaw puste), ustaw limit i kliknij **Szukaj**.")
 else:
-    rows = query_jobs(q=ttl_in, loc=loc_in, sen=sen_in)
-    st.write(f"Wyniki: **{len(rows)}**")
+    total = count_jobs(q=ttl_in, loc=loc_in, sen=sen_in)
+    rows = query_jobs(q=ttl_in, loc=loc_in, sen=sen_in, limit=int(limit_in))
+    st.write(f"Wyniki: **{total}**  •  pokazuję: **{len(rows)}** (limit = {int(limit_in)})")
     if not rows:
         st.warning("Brak rekordów. Spróbuj krótszego fragmentu (np. 'data', 'wro').")
     else:
