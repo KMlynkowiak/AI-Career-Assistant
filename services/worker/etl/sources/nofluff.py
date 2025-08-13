@@ -3,7 +3,7 @@
 NoFluffJobs source (portfolio-friendly).
 
 Próbuje pobrać ogłoszenia z internetu (API/HTML) — jeśli nie wyjdzie, zwraca
-zestaw DANYCH PRZYKŁADOWYCH (ok. 25), żeby pipeline (ETL→API→Dashboard)
+zestaw DANYCH PRZYKŁADOWYCH (skalowalny), żeby pipeline (ETL→API→Dashboard)
 zawsze miał co wstawić do bazy i demo nie było puste.
 """
 from __future__ import annotations
@@ -20,7 +20,6 @@ _BASE = [
     ("Junior AI Engineer", "VisionTech", "Wrocław", "Computer Vision, podstawy PyTorch, Docker, REST API.", "https://nofluffjobs.com/"),
 ]
 
-# Dodatkowe warianty (proste mieszanie tytułów i miast)
 _EXTRA_TITLES = [
     "Data Analyst", "Analytics Engineer", "BI Developer",
     "MLOps Engineer", "Machine Learning Engineer",
@@ -30,7 +29,7 @@ _EXTRA_TITLES = [
 _EXTRA_CITIES = ["Warszawa", "Kraków", "Poznań", "Wrocław", "Gdańsk", "Zdalnie", "Łódź", "Katowice"]
 _EXTRA_COMP = ["TechFlow", "InData", "MLWorks", "Quantica", "StreamSoft", "ModelX"]
 
-def _samples(target: int = 25) -> List[Dict]:
+def _samples(target: int) -> List[Dict]:
     out: List[Dict] = []
     today = dt.date.today().isoformat()
 
@@ -47,7 +46,7 @@ def _samples(target: int = 25) -> List[Dict]:
             "url": url,
         })
 
-    # generowane warianty
+    # generowane warianty aż do target
     idx = 1000 + len(out)
     while len(out) < target:
         t = _EXTRA_TITLES[(len(out)) % len(_EXTRA_TITLES)]
@@ -71,6 +70,11 @@ def _try_fetch_online(limit: int = 50) -> Optional[List[Dict]]:
     return None
 
 def fetch_jobs(limit: int = 50) -> List[Dict]:
+    """
+    Zwraca do 'limit' rekordów (bez sztucznego limitu 100).
+    Dla bezpieczeństwa ograniczamy do max 500, żeby nie wyprodukować zbyt wielkiej bazy.
+    """
+    limit = max(5, min(500, int(limit)))
     online = _try_fetch_online(limit=limit)
     if online:
         out = []
@@ -80,5 +84,4 @@ def fetch_jobs(limit: int = 50) -> List[Dict]:
             rr.setdefault("posted_at", dt.date.today().isoformat())
             out.append(rr)
         return out
-    # Fallback – zawsze coś zwróć do demo
-    return _samples(target=max(5, min(100, limit)))
+    return _samples(target=limit)
