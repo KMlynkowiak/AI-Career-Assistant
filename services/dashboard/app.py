@@ -2,6 +2,7 @@
 import os
 import sqlite3
 import html
+import unicodedata
 import streamlit as st
 import pandas as pd
 
@@ -9,7 +10,7 @@ DB_PATH = os.environ.get("DB_PATH", "data/ai_jobs.db")
 
 st.set_page_config(page_title="AI Jobs Finder", page_icon="🔎", layout="wide")
 
-# Minimalistyczny, ciemny styl
+# ===== Styl minimal =====
 st.markdown(
     """
     <style>
@@ -47,7 +48,8 @@ st.markdown(
 
 st.title("🔎 AI / Data Jobs — minimal")
 
-with st.container():
+# ====== Formularz (ENTER submit) ======
+with st.form("search_form", clear_on_submit=False):
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
         ttl = st.text_input("Tytuł (fragment)", value="", placeholder="np. data, ml, analytics …")
@@ -57,20 +59,27 @@ with st.container():
         loc = st.text_input("Lokalizacja", value="", placeholder="np. Warszawa / Zdalnie …")
     with c4:
         limit_txt = st.text_input("Limit wyników (puste = brak limitu)", value="")
-    btn = st.button("Szukaj", type="primary", use_container_width=True)
+    submitted = st.form_submit_button("Szukaj", use_container_width=True)
+
+# ====== Akcenty/diakrytyki: funkcja do porównań ======
+def noacc(s: str) -> str:
+    if s is None:
+        return ""
+    # usuwamy znaki diakrytyczne i zamieniamy na lower
+    return "".join(c for c in unicodedata.normalize("NFKD", str(s)) if not unicodedata.combining(c)).lower()
 
 def run_query(q: str, s: str, l: str, limit_txt: str) -> pd.DataFrame:
     where = []
     params = {}
     if q:
-        where.append("LOWER(title) LIKE :q")
-        params["q"] = f"%{q.lower()}%"
+        where.append("NOACC(title) LIKE NOACC(:q)")
+        params["q"] = f"%{q}%"
     if s:
-        where.append("LOWER(seniority) = :s")
-        params["s"] = s.lower()
+        where.append("NOACC(seniority) = NOACC(:s)")
+        params["s"] = s
     if l:
-        where.append("LOWER(location) LIKE :l")
-        params["l"] = f"%{l.lower()}%"
+        where.append("NOACC(location) LIKE NOACC(:l)")
+        params["l"] = f"%{l}%"
 
     wh = ("WHERE " + " AND ".join(where)) if where else ""
     lim = ""
@@ -91,13 +100,14 @@ def run_query(q: str, s: str, l: str, limit_txt: str) -> pd.DataFrame:
     """
     con = sqlite3.connect(DB_PATH)
     try:
+        # rejestrujemy funkcję NOACC w SQLite (akcent-insensitive match)
+        con.create_function("NOACC", 1, noacc)
         df = pd.read_sql_query(sql, con, params=params)
     finally:
         con.close()
     return df
 
 def render_html_table(df: pd.DataFrame) -> str:
-    # Zbuduj kolumnę „Tytuł” jako klikalny link
     titles = []
     for t, u in zip(df["title"], df["url"]):
         safe_t = html.escape(t or "")
@@ -106,7 +116,6 @@ def render_html_table(df: pd.DataFrame) -> str:
         else:
             titles.append(safe_t)
 
-    # Złóż minimalną tabelę HTML (bez indeksów i bez kolumny url)
     rows_html = []
     for i in range(len(df)):
         rows_html.append(
@@ -118,24 +127,19 @@ def render_html_table(df: pd.DataFrame) -> str:
             "</tr>"
         )
 
-    table = (
+    return (
         "<table class='jobs'>"
         "<thead><tr>"
         "<th>Tytuł</th><th>Seniority</th><th>Lokalizacja</th><th>Firma</th>"
-        "</tr></thead>"
-        "<tbody>"
-        + "".join(rows_html) +
-        "</tbody></table>"
+        "</tr></thead><tbody>" + "".join(rows_html) + "</tbody></table>"
     )
-    return table
 
-if btn:
+if submitted:
     df = run_query(ttl, sen, loc, limit_txt)
     st.caption(f"Wyników: {len(df):,}")
     if df.empty:
         st.info("Brak dopasowań. Zmień filtr lub usuń część kryteriów.")
     else:
-        html_table = render_html_table(df)
-        st.markdown(html_table, unsafe_allow_html=True)
+        st.markdown(render_html_table(df), unsafe_allow_html=True)
 else:
-    st.info("Uzupełnij filtry i kliknij **Szukaj**. (Puste „Limit wyników” = brak limitu)")
+    st.info("Uzupełnij filtry i kliknij **Szukaj** lub naciśnij **Enter**. (Puste „Limit wyników” = brak limitu)")

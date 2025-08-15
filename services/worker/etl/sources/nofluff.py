@@ -6,18 +6,24 @@ import re
 import json
 import time
 import datetime as dt
-from typing import List, Dict, Optional, Iterable
+from typing import List, Dict, Optional, Iterable, Set
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
 SOURCE_NAME = "NoFluffJobs(HTML)"
 
-# ===== Konfiguracja (ENV) =====
-NFJ_COUNTRY = os.getenv("NFJ_COUNTRY", "pl").strip()              # "pl" | "en"
-NFJ_CATEGORIES = os.getenv("NFJ_CATEGORIES", "data,backend,devops,machine-learning,analytics").split(",")
-NFJ_REMOTE = os.getenv("NFJ_REMOTE", "1") == "1"                  # 1 => dodaj /remote/<cat>
-NFJ_PAGES = int(os.getenv("NFJ_PAGES", "6"))                      # strony listingu na kategorię
-NFJ_DELAY = float(os.getenv("NFJ_DELAY", "1.0"))                  # przerwa między żądaniami (sek.)
+# ===== Konfiguracja (ENV; dobrane pod ≥500) =====
+NFJ_COUNTRY = os.getenv("NFJ_COUNTRY", "pl").strip()  # "pl" | "en"
+NFJ_CATEGORIES = os.getenv(
+    "NFJ_CATEGORIES",
+    # szeroki wachlarz kategorii związanych z danymi / backendem / ML
+    "data,backend,devops,machine-learning,analytics,ai,big-data,cloud,security,fullstack,testing"
+).split(",")
+NFJ_REMOTE = os.getenv("NFJ_REMOTE", "1") == "1"      # 1 => dodaj /remote/<cat>
+NFJ_PAGES = int(os.getenv("NFJ_PAGES", "10"))         # strony listingu na kategorię
+NFJ_DELAY = float(os.getenv("NFJ_DELAY", "0.6"))      # przerwa między żądaniami (sek.)
+NFJ_WORKERS = int(os.getenv("NFJ_WORKERS", "8"))      # wątki do pobierania stron ogłoszeń
 USER_AGENT = os.getenv(
     "NFJ_UA",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -40,18 +46,15 @@ def _sen_from_title(title: str) -> str:
 # ===== HTML helpers =====
 _LIST_JOB_LINK_RE = re.compile(r'href="(/(?:en|pl)/job/[^"]+)"')
 _LIST_JOB_LINK_ABS_RE = re.compile(r'href="(https://nofluffjobs\.com/(?:en|pl)/job/[^"]+)"', re.I)
-_ANY_JOB_URL_RE = re.compile(r'https://nofluffjobs\.com/(?:en|pl)/job/[A-Za-z0-9_\-\/]+' , re.I)
+_ANY_JOB_URL_RE = re.compile(r'https://nofluffjobs\.com/(?:en|pl)/job/[A-Za-z0-9_\-\/]+', re.I)
 
 def _normalize_job_url(u: str) -> str:
-    if u.startswith("http"):
-        return u
-    return f"https://nofluffjobs.com{u}"
+    return u if u.startswith("http") else f"https://nofluffjobs.com{u}"
 
 def _listing_urls() -> Iterable[str]:
     base = "https://nofluffjobs.com"
     cats = [c.strip() for c in NFJ_CATEGORIES if c.strip()]
     for cat in cats:
-        # /pl/<cat>?page=1..N
         for p in range(1, NFJ_PAGES + 1):
             yield f"{base}/{NFJ_COUNTRY}/{cat}?page={p}"
         if NFJ_REMOTE:
@@ -60,17 +63,14 @@ def _listing_urls() -> Iterable[str]:
 
 def _extract_links_from_listing(html: str) -> List[str]:
     links = []
-    # klasyczne href
     for m in _LIST_JOB_LINK_RE.finditer(html):
         links.append(_normalize_job_url(m.group(1)))
     for m in _LIST_JOB_LINK_ABS_RE.finditer(html):
         links.append(_normalize_job_url(m.group(1)))
-    # linki pojawiające się w zagnieżdżonych JSON-ach
     for m in _ANY_JOB_URL_RE.finditer(html):
         links.append(_normalize_job_url(m.group(0)))
 
-    # unikalność z zachowaniem kolejności
-    seen = set()
+    seen: Set[str] = set()
     uniq = []
     for u in links:
         if u not in seen:
@@ -79,11 +79,8 @@ def _extract_links_from_listing(html: str) -> List[str]:
     return uniq
 
 def _extract_job_from_html(html: str, url: str) -> Dict:
-    """
-    Parsuje JSON-LD JobPosting; jeśli brakuje lokacji, próbuje heurystyk z HTML.
-    """
+    # Szukamy JSON-LD JobPosting
     job = None
-    # Szukaj <script type="application/ld+json"> z JobPosting
     for m in re.finditer(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, flags=re.S|re.I):
         raw = m.group(1).strip()
         try:
@@ -116,11 +113,9 @@ def _extract_job_from_html(html: str, url: str) -> Dict:
 
     if job:
         title = job.get("title") or ""
-        # firma
         hiring = job.get("hiringOrganization") or {}
         if isinstance(hiring, dict):
             company = hiring.get("name") or ""
-        # lokalizacja
         locobj = job.get("jobLocation")
         addr = {}
         if isinstance(locobj, list) and locobj:
@@ -128,32 +123,26 @@ def _extract_job_from_html(html: str, url: str) -> Dict:
         elif isinstance(locobj, dict):
             addr = (locobj.get("address", {}) or {})
         location = addr.get("addressLocality") or addr.get("addressRegion") or addr.get("addressCountry") or ""
-        # opis + data
         desc = job.get("description") or ""
         posted = job.get("datePosted") or job.get("validFrom")
 
-    # ===== Fallback lokalizacji, jeśli pusto =====
+    # Fallback lokalizacji: remote/hybrid, a potem prosty wycinek z JSON-a
     if not location:
-        # 1) meta/tekstowe wskazówki "remote/hybrid"
         if _REMOTE_HINT.search(html) or _REMOTE_HINT.search(title) or _REMOTE_HINT.search(desc or ""):
             location = "Zdalnie"
         else:
-            # 2) spróbuj prosto wyciągnąć nazwę miasta z tytułu strony lub z fragmentów HTML
-            #    (prosty heurystyczny regex na 'addressLocality' w innej strukturze JSON na stronie)
             mx = re.search(r'"addressLocality"\s*:\s*"([^"]+)"', html)
             if mx:
                 location = mx.group(1)
+
     if not title:
         mt = re.search(r"<title>(.*?)</title>", html, re.S|re.I)
         if mt:
             title = mt.group(1).split("|")[0].strip()
-
     if not company:
-        # prosty heurystyczny fallback firmy, jeśli JSON-LD nie oddał; szukamy jakichś wzorców
         mco = re.search(r'"hiringOrganization"\s*:\s*{[^}]*"name"\s*:\s*"([^"]+)"', html)
         if mco:
             company = mco.group(1)
-
     if not location:
         location = "Nie podano"
 
@@ -178,14 +167,9 @@ def _safe_get(session: requests.Session, url: str, timeout: int = 30) -> Optiona
     except Exception:
         return None
 
-# ===== Publiczne API =====
 def fetch_jobs(limit: int = 50) -> List[Dict]:
     """
-    Realne oferty z NoFluffJobs przez HTML (bez Apify).
-    - przegląda listingi (wiele kategorii + /remote),
-    - zbiera linki do /job/… (z hrefów i z JSON osadzonych na stronie),
-    - z podstron parsuje JSON-LD JobPosting,
-    - uzupełnia brakujące lokalizacje prostą heurystyką.
+    Realne oferty z NoFluffJobs przez HTML (bez Apify), z równoległym pobieraniem stron ogłoszeń.
     """
     limit = max(1, min(5000, int(limit)))
     sess = requests.Session()
@@ -196,35 +180,55 @@ def fetch_jobs(limit: int = 50) -> List[Dict]:
         "Cache-Control": "no-cache",
     })
 
-    out: List[Dict] = []
-    seen = set()
-
+    # 1) Zbierz jak najwięcej linków do /job/… z wielu listingów
+    all_job_urls: List[str] = []
+    seen_listings: Set[str] = set()
     for lst_url in _listing_urls():
-        if len(out) >= limit:
-            break
+        if lst_url in seen_listings:
+            continue
+        seen_listings.add(lst_url)
         html = _safe_get(sess, lst_url)
         time.sleep(NFJ_DELAY)
         if not html:
             continue
-
         links = _extract_links_from_listing(html)
-        for job_url in links:
-            if len(out) >= limit:
-                break
-            if job_url in seen:
-                continue
-            seen.add(job_url)
+        all_job_urls.extend(links)
+        # jeśli już mamy sporo, możemy przejść do fetchu stron ogłoszeń
+        if len(all_job_urls) >= limit * 2:
+            break
 
-            jhtml = _safe_get(sess, job_url)
-            time.sleep(NFJ_DELAY)
-            if not jhtml:
-                continue
+    # unikalne URL-e
+    seen_jobs: Set[str] = set()
+    uniq_job_urls = []
+    for u in all_job_urls:
+        if u not in seen_jobs:
+            seen_jobs.add(u)
+            uniq_job_urls.append(u)
 
-            rec = _extract_job_from_html(jhtml, job_url)
-            # sanity: potrzebujemy tytuł i (najlepiej) firmę
-            if not rec.get("title"):
-                continue
-            out.append(rec)
+    # 2) Równoległe pobieranie stron ogłoszeń i parsowanie JSON-LD
+    out: List[Dict] = []
+    if not uniq_job_urls:
+        return out
+
+    def fetch_one(u: str) -> Optional[Dict]:
+        jhtml = _safe_get(sess, u)
+        # delikatny throttle per-request (nawet w wątkach)
+        time.sleep(NFJ_DELAY)
+        if not jhtml:
+            return None
+        return _extract_job_from_html(jhtml, u)
+
+    with ThreadPoolExecutor(max_workers=max(1, NFJ_WORKERS)) as ex:
+        futures = [ex.submit(fetch_one, u) for u in uniq_job_urls]
+        for fut in as_completed(futures):
+            try:
+                rec = fut.result()
+            except Exception:
+                rec = None
+            if rec and rec.get("title"):
+                out.append(rec)
+                if len(out) >= limit:
+                    break
 
     today = dt.date.today().isoformat()
     for r in out:
