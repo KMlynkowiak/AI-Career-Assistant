@@ -39,9 +39,9 @@ with st.form("search"):
 # ------- Limit poza formularzem (działa natychmiast) -------
 limit = st.selectbox("Limit wyników", [50, 100, 200, 500, 1000], index=2)
 
-# ------- Filtrowanie + wyświetlanie -------
+# ------- Filtrowanie -------
 df = load_df()
-base = len(df)
+base_total = len(df)
 
 if ttl.strip():
     df = df[df["_title_na"].str.contains(no_accents(ttl).lower(), na=False)]
@@ -50,16 +50,20 @@ if loc.strip():
 if sen.strip():
     df = df[df["seniority"].fillna("").str.lower().str.contains(sen.lower(), na=False)]
 
-st.caption(f"{len(df)} ofert (z {base} w bazie)")
+filtered_total = len(df)
+# zastosuj LIMIT *przed* renderem
+displayed_df = df.head(limit).copy()
+showing = len(displayed_df)
 
-# Zastosuj limit TU — przed renderem
-df = df.head(limit).copy()
+# Czytelny komunikat: ile pokazujemy vs ile znaleziono vs ile w bazie
+st.caption(f"Pokazuję {showing} z {filtered_total} wyników (w bazie: {base_total})")
 
-if df.empty:
+# ------- Render listy: tytuł jako link -------
+if displayed_df.empty:
     st.info("Brak wyników dla podanych filtrów.")
 else:
     rows_html = []
-    for _, r in df.iterrows():
+    for _, r in displayed_df.iterrows():
         title = (r["title"] or "").strip()
         url = (r["url"] or "").strip()
         company = (r["company"] or "").strip()
