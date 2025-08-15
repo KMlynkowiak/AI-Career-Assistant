@@ -7,6 +7,7 @@ st.markdown("<style>div.block-container{padding-top:1rem;}</style>", unsafe_allo
 st.title("AI Job Finder — NoFluffJobs")
 
 DB_PATH = os.getenv("DB_PATH", "data/ai_jobs.db")
+BOX_H = int(os.getenv("UI_BOX_HEIGHT", "560"))  # wysokość scrollowanego boksu (px)
 
 def no_accents(s: str) -> str:
     if not isinstance(s, str):
@@ -28,7 +29,7 @@ def load_df():
         df[f"_{col}_na"] = df[col].map(no_accents).str.lower()
     return df
 
-# ------- Formularz wyszukiwania (Enter uruchamia submit) -------
+# ------- Formularz (Enter uruchamia submit) -------
 with st.form("search"):
     c1, c2, c3 = st.columns([2, 2, 1])
     ttl = c1.text_input("Tytuł (np. data, python, analityk)", "")
@@ -51,18 +52,23 @@ if sen.strip():
     df = df[df["seniority"].fillna("").str.lower().str.contains(sen.lower(), na=False)]
 
 filtered_total = len(df)
-# zastosuj LIMIT *przed* renderem
 displayed_df = df.head(limit).copy()
 showing = len(displayed_df)
 
-# Czytelny komunikat: ile pokazujemy vs ile znaleziono vs ile w bazie
 st.caption(f"Pokazuję {showing} z {filtered_total} wyników (w bazie: {base_total})")
 
-# ------- Render listy: tytuł jako link -------
+# ------- Render „tabeli” w scrollowanym boksie -------
 if displayed_df.empty:
     st.info("Brak wyników dla podanych filtrów.")
 else:
+    # zbuduj wiersze HTML (tytuł jako link)
     rows_html = []
+    # Nagłówek tabeli (sticky)
+    header_html = (
+        '<div class="result-row header">'
+        '<div>Tytuł</div><div>Firma</div><div>Lokalizacja</div><div>Seniority</div><div>Data</div>'
+        "</div>"
+    )
     for _, r in displayed_df.iterrows():
         title = (r["title"] or "").strip()
         url = (r["url"] or "").strip()
@@ -71,12 +77,57 @@ else:
         seniority = (r["seniority"] or "").strip()
         posted = (r["posted_at"] or "").strip()
         rows_html.append(
-            f'<div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'
-            f'<a href="{url}" target="_blank" style="text-decoration:none;">{title}</a>'
-            f' &nbsp;—&nbsp; <span style="opacity:.9">{company}</span>'
-            f' &nbsp;•&nbsp; <span style="opacity:.8">{location}</span>'
-            f' &nbsp;•&nbsp; <span style="opacity:.8">{seniority}</span>'
-            f' &nbsp;•&nbsp; <span style="opacity:.6">{posted}</span>'
-            f'</div>'
+            '<div class="result-row">'
+            f'<div><a href="{url}" target="_blank" style="text-decoration:none;">{title}</a></div>'
+            f'<div>{company}</div>'
+            f'<div>{location}</div>'
+            f'<div>{seniority}</div>'
+            f'<div>{posted}</div>'
+            "</div>"
         )
-    st.markdown("\n".join(rows_html), unsafe_allow_html=True)
+
+    st.markdown(
+        f"""
+        <div class="results-box">
+          {header_html}
+          {''.join(rows_html)}
+        </div>
+
+        <style>
+          .results-box {{
+            max-height: {BOX_H}px;
+            overflow-y: auto;
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 10px;
+            padding: 6px 10px;
+            background: rgba(255,255,255,0.02);
+          }}
+          .results-box::-webkit-scrollbar {{ width: 10px; }}
+          .results-box::-webkit-scrollbar-thumb {{
+            background: rgba(255,255,255,0.15);
+            border-radius: 10px;
+          }}
+          .result-row {{
+            display: grid;
+            grid-template-columns: 4fr 2fr 2fr 1fr 1fr;
+            gap: 12px;
+            align-items: center;
+            padding: 8px 2px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            font-size: 0.96rem;
+            line-height: 1.2rem;
+          }}
+          .result-row:last-child {{ border-bottom: none; }}
+          .result-row.header {{
+            position: sticky; top: 0;
+            background: rgba(0,0,0,0.45);
+            backdrop-filter: blur(3px);
+            font-weight: 600;
+            border-bottom: 1px solid rgba(255,255,255,0.25);
+            z-index: 5;
+          }}
+          .result-row a {{ color: inherit; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
