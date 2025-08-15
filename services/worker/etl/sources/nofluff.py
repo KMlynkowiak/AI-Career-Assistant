@@ -14,24 +14,28 @@ import requests
 SOURCE_NAME = "NoFluffJobs(HTML)"
 
 # ===== Konfiguracja (ENV) =====
-NFJ_COUNTRY   = os.getenv("NFJ_COUNTRY", "pl").strip()  # "pl" | "en"
-NFJ_CATEGORIES = os.getenv(
-    "NFJ_CATEGORIES",
-    "data,backend,devops,machine-learning,analytics,ai,big-data,cloud,security,fullstack,testing,data-science,etl,bi"
-).split(",")
-NFJ_REMOTE    = os.getenv("NFJ_REMOTE", "1") == "1"     # dołóż /remote/<cat>
-NFJ_PAGES     = int(os.getenv("NFJ_PAGES", "12"))       # głębiej po listingach
-NFJ_DELAY     = float(os.getenv("NFJ_DELAY", "0.6"))    # ms między requestami
-NFJ_WORKERS   = int(os.getenv("NFJ_WORKERS", "8"))      # równoległe pobieranie ofert
-NFJ_HARD_LIMIT= int(os.getenv("NFJ_HARD_LIMIT", "5000"))# twardy limit ochronny
+NFJ_COUNTRY     = os.getenv("NFJ_COUNTRY", "pl").strip()  # "pl" | "en"
+NFJ_REMOTE      = os.getenv("NFJ_REMOTE", "1") == "1"     # dołóż /remote/...
+NFJ_PAGES       = int(os.getenv("NFJ_PAGES", "15"))       # głębokość paginacji na listingach
+NFJ_DELAY       = float(os.getenv("NFJ_DELAY", "0.6"))    # throttle per request (sek.)
+NFJ_WORKERS     = int(os.getenv("NFJ_WORKERS", "10"))     # równoległe pobieranie podstron ofert
+NFJ_HARD_LIMIT  = int(os.getenv("NFJ_HARD_LIMIT", "10000")) # twardy bezpiecznik
+# Pełne „wszystko”: dodaj listingi root /{country}?page=...
+NFJ_ALL_LISTINGS= os.getenv("NFJ_ALL_LISTINGS", "1") == "1"
+
+# Domyślny koszyk kategorii (gdy auto-discovery nie zadziała)
+DEFAULT_CATEGORIES = [
+    "backend","frontend","fullstack","devops","security","mobile","data","machine-learning",
+    "analytics","ai","big-data","cloud","testing","qa","game","embedded","ux","erp",
+    "pm","product","support","sales","marketing","bi","etl","java","python","dotnet","php",
+]
 
 USER_AGENT = os.getenv(
     "NFJ_UA",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome Safari"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari"
 )
 
-# ===== Heurystyki =====
+# ===== Heurystyki seniority =====
 _JUN = re.compile(r"\b(junior|intern|trainee|student|jr)\b", re.I)
 _SEN = re.compile(r"\b(senior|lead|principal|staff|expert|architect|sr)\b", re.I)
 _MID = re.compile(r"\b(mid|middle|regular)\b", re.I)
@@ -45,24 +49,14 @@ def _sen_from_title(title: str) -> str:
     return "Mid"
 
 # ===== Link finders =====
-_LIST_JOB_LINK_RE       = re.compile(r'href="(/(?:en|pl)/job/[^"]+)"', re.I)
-_LIST_JOB_LINK_DATAHREF = re.compile(r'data-href="(/(?:en|pl)/job/[^"]+)"', re.I)
-_LIST_JOB_LINK_ABS_RE   = re.compile(r'href="(https://nofluffjobs\.com/(?:en|pl)/job/[^"]+)"', re.I)
-# pozwól na znaki aż do cudzysłowu/spacji/znaku < itp. (łapie też query stringi)
-_ANY_JOB_URL_RE         = re.compile(r'https://nofluffjobs\.com/(?:en|pl)/job/[^"\'<>\s]+', re.I)
+_LIST_JOB_LINK_RE        = re.compile(r'href="(/(?:en|pl)/job/[^"]+)"', re.I)
+_LIST_JOB_LINK_DATAHREF  = re.compile(r'data-href="(/(?:en|pl)/job/[^"]+)"', re.I)
+_LIST_JOB_LINK_ABS_RE    = re.compile(r'href="(https://nofluffjobs\.com/(?:en|pl)/job/[^"]+)"', re.I)
+_ANY_JOB_URL_RE          = re.compile(r'https://nofluffjobs\.com/(?:en|pl)/job/[^"\'<>\s]+', re.I)
+_CAT_SLUG_RE             = re.compile(r'href="/(?:en|pl)/([a-z0-9\-]+)"', re.I)
 
 def _normalize_job_url(u: str) -> str:
     return u if u.startswith("http") else f"https://nofluffjobs.com{u}"
-
-def _listing_urls() -> Iterable[str]:
-    base = "https://nofluffjobs.com"
-    cats = [c.strip() for c in NFJ_CATEGORIES if c.strip()]
-    for cat in cats:
-        for p in range(1, NFJ_PAGES + 1):
-            yield f"{base}/{NFJ_COUNTRY}/{cat}?page={p}"
-        if NFJ_REMOTE:
-            for p in range(1, NFJ_PAGES + 1):
-                yield f"{base}/{NFJ_COUNTRY}/remote/{cat}?page={p}"
 
 def _safe_get(url: str, timeout: int = 30) -> Optional[str]:
     try:
@@ -81,6 +75,50 @@ def _safe_get(url: str, timeout: int = 30) -> Optional[str]:
         return r.text
     except Exception:
         return None
+
+def _discover_categories(country: str) -> List[str]:
+    """
+    Próbujemy odczytać slugi kategorii z /{country} i /{country}/remote.
+    Jeśli nie wyjdzie – wracamy do DEFAULT_CATEGORIES.
+    """
+    base = f"https://nofluffjobs.com/{country}"
+    htmls = []
+    for path in ("", "/remote"):
+        h = _safe_get(base + path)
+        if h:
+            htmls.append(h)
+        time.sleep(NFJ_DELAY)
+
+    slugs: Set[str] = set()
+    for h in htmls:
+        for m in _CAT_SLUG_RE.finditer(h):
+            slug = m.group(1).lower()
+            if slug and slug not in {"job", "remote"}:
+                slugs.add(slug)
+
+    # sanity – usuwamy oczywiste „inne” linki
+    slugs = {s for s in slugs if len(s) >= 2 and all(ch.isalnum() or ch == "-" for ch in s)}
+    if not slugs:
+        return DEFAULT_CATEGORIES
+    return sorted(slugs)
+
+def _listing_urls(country: str) -> Iterable[str]:
+    base = "https://nofluffjobs.com"
+    cats = _discover_categories(country)
+    # 1) listingi po kategoriach
+    for cat in cats:
+        for p in range(1, NFJ_PAGES + 1):
+            yield f"{base}/{country}/{cat}?page={p}"
+        if NFJ_REMOTE:
+            for p in range(1, NFJ_PAGES + 1):
+                yield f"{base}/{country}/remote/{cat}?page={p}"
+    # 2) globalne listingi root (łapią „wszystko” niezależnie od kategorii)
+    if NFJ_ALL_LISTINGS:
+        for p in range(1, NFJ_PAGES + 1):
+            yield f"{base}/{country}?page={p}"
+        if NFJ_REMOTE:
+            for p in range(1, NFJ_PAGES + 1):
+                yield f"{base}/{country}/remote?page={p}"
 
 def _extract_links_from_listing(html: str) -> List[str]:
     links = []
@@ -102,7 +140,7 @@ def _extract_links_from_listing(html: str) -> List[str]:
     return out
 
 def _extract_job_from_html(html: str, url: str) -> Dict:
-    # Szukaj JSON-LD JobPosting
+    # JSON-LD JobPosting
     job = None
     for m in re.finditer(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, flags=re.S|re.I):
         raw = m.group(1).strip()
@@ -131,7 +169,6 @@ def _extract_job_from_html(html: str, url: str) -> Dict:
     title = ""
     company = ""
     location = ""
-    desc = ""
     posted = None
 
     if job:
@@ -146,27 +183,27 @@ def _extract_job_from_html(html: str, url: str) -> Dict:
         elif isinstance(locobj, dict):
             addr = (locobj.get("address", {}) or {})
         location = addr.get("addressLocality") or addr.get("addressRegion") or addr.get("addressCountry") or ""
-        desc = job.get("description") or ""
         posted = job.get("datePosted") or job.get("validFrom")
 
-    # Fallback lokalizacji
     if not location:
-        if _REMOTE_HINT.search(html) or _REMOTE_HINT.search(title) or _REMOTE_HINT.search(desc or ""):
+        # Remote/hybrid
+        if re.search(_REMOTE_HINT, html) or re.search(_REMOTE_HINT, title or ""):
             location = "Zdalnie"
         else:
             mx = re.search(r'"addressLocality"\s*:\s*"([^"]+)"', html)
             if mx:
                 location = mx.group(1)
 
-    # Fallback tytułu/firmy
     if not title:
         mt = re.search(r"<title>(.*?)</title>", html, re.S|re.I)
         if mt:
             title = mt.group(1).split("|")[0].strip()
+
     if not company:
         mco = re.search(r'"hiringOrganization"\s*:\s*{[^}]*"name"\s*:\s*"([^"]+)"', html)
         if mco:
             company = mco.group(1)
+
     if not location:
         location = "Nie podano"
 
@@ -175,29 +212,33 @@ def _extract_job_from_html(html: str, url: str) -> Dict:
         "title": title,
         "company": company,
         "location": location,
-        "desc": desc,
-        "source": SOURCE_NAME,
-        "posted_at": posted,
-        "url": url,
         "seniority": _sen_from_title(title),
+        "url": url,
+        "posted_at": posted,
+        "source": SOURCE_NAME,
     }
 
-def fetch_jobs(limit: int = 50) -> List[Dict]:
+def fetch_jobs(limit: int = 1000000) -> List[Dict]:
     """
-    Realne oferty z NoFluffJobs przez HTML (bez Apify) z równoległym pobieraniem stron ogłoszeń.
-    Bez „early break” – przechodzimy przez wszystkie listingi, potem fetchujemy joby równolegle.
+    Ściąga WSZYSTKO (w granicach NFJ_PAGES i NFJ_ALL_LISTINGS + kategorii), bez filtrowania po branży.
+    Minimalny zestaw pól: title, company, location, seniority, url (+ posted_at).
     """
     limit = max(1, min(int(limit), NFJ_HARD_LIMIT))
 
-    # 1) Zbierz linki z WSZYSTKICH listingów
+    # 1) Zbierz linki z WSZYSTKICH listingów (PL + opcjonalnie EN)
+    countries = [NFJ_COUNTRY]
+    if NFJ_COUNTRY.lower() != "en":
+        countries.append("en")  # dorzuć EN – często więcej ofert
+
     all_job_urls: List[str] = []
-    for lst_url in _listing_urls():
-        html = _safe_get(lst_url)
-        time.sleep(NFJ_DELAY)
-        if not html:
-            continue
-        links = _extract_links_from_listing(html)
-        all_job_urls.extend(links)
+    for country in countries:
+        for lst in _listing_urls(country):
+            html = _safe_get(lst)
+            time.sleep(NFJ_DELAY)
+            if not html:
+                continue
+            links = _extract_links_from_listing(html)
+            all_job_urls.extend(links)
 
     # unikalne URL-e
     seen: Set[str] = set()
@@ -210,7 +251,7 @@ def fetch_jobs(limit: int = 50) -> List[Dict]:
     if not uniq_urls:
         return []
 
-    # 2) Równoległe pobieranie jobów – BEZ współdzielonego Session
+    # 2) Równoległe pobieranie i parsowanie ofert
     def fetch_one(u: str) -> Optional[Dict]:
         h = _safe_get(u)
         time.sleep(NFJ_DELAY)
