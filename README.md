@@ -118,36 +118,6 @@ data/
 **Tabela `jobs_clean`** = dane gotowe do UI (po deduplikacji i normalizacji).  
 **Klucz rekordu**: `id = url` (stabilny, zapobiega duplikatom).
 
----
-
-## Dlaczego to jest „portfolio-ready”
-
-- **Realny use-case**: szybkie przeszukiwanie ofert IT (NFJ).  
-- **Pełna ścieżka danych**: pobranie → transformacje → baza → UI.  
-- **Jakość**: brak duplikatów (UPSERT), fallbacki i retrysy w backfillu, logi.  
-- **Prosty deploy**: SQLite + Streamlit → działa lokalnie i na serwerze.  
-- **Czytelny UI**: minimalistyczny, tytuł jako link, ignoruje diakrytyki.
-
-Chętnie opowiem o kompromisach (np. throttle, równoległość, indeksy).
-
----
-
-## Etyka i fair-use
-
-Projekt edukacyjny/portfolio. Szanuj warunki korzystania z NoFluffJobs:  
-stosuj **opóźnienia (`NFJ_DELAY`)**, nie przeciążaj serwisu, używaj danych wyłącznie do użytku własnego/edukacyjnego.
-
----
-
-## Roadmap (krótko)
-
-- [ ] Sortowanie po kolumnach (klik w nagłówki).  
-- [ ] Paginacja w UI.  
-- [ ] Prosty API endpoint (FastAPI) pod inne fronty.  
-- [ ] Testy jednostkowe utilsów + GitHub Actions.  
-- [ ] Eksport wyników do CSV/Parquet z UI.
-
----
 
 ## Licencja
 
