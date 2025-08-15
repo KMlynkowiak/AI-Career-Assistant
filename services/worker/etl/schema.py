@@ -1,33 +1,37 @@
-from sqlalchemy import Table, Column, String, MetaData, Text
+# services/worker/etl/schema.py
+from __future__ import annotations
+
+from sqlalchemy import MetaData, Table, Column, String, Text
 
 metadata = MetaData()
 
-from sqlalchemy import Table, Column, String, Text, MetaData
-
-metadata = MetaData()
-
+# surowe rekordy (RAW) – trzymamy to co przychodzi ze źródeł
 jobs_table = Table(
-    "jobs_raw",
+    "jobs_table",
     metadata,
-    Column("id", String, primary_key=True),
+    Column("id", String, primary_key=False),  # unikalność wymusimy indeksem
     Column("title", String),
     Column("company", String),
     Column("location", String),
-    Column("description", Text),
+    Column("desc", Text),
     Column("source", String),
-    Column("seniority", String),  # <-- dodaj to
+    Column("posted_at", String),
+    Column("url", String),
+    Column("seniority", String),  # to co podaje źródło albo nasz fallback
 )
 
-
+# oczyszczone rekordy (CLEAN) – gotowe do UI/API
 jobs_clean = Table(
     "jobs_clean",
     metadata,
-    Column("id", String, primary_key=True),
+    Column("id", String, primary_key=False),
     Column("title", String),
     Column("company", String),
     Column("location", String),
-    Column("skills", String),  # comma-separated
-    Column("seniority", String),
-    Column("tech_stack", String),  # comma-separated normalized
+    Column("desc", Text),
     Column("source", String),
+    Column("posted_at", String),
+    Column("url", String),
+    Column("skills", String),
+    Column("seniority", String),  # finalna klasyfikacja
 )
