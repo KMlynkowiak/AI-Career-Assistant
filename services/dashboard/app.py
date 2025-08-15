@@ -18,23 +18,28 @@ def no_accents(s: str) -> str:
 def load_df():
     con = sqlite3.connect(DB_PATH)
     df = pd.read_sql_query(
-        "SELECT title, company, location, seniority, url, posted_at FROM jobs_clean "
+        "SELECT title, company, location, seniority, url, posted_at "
+        "FROM jobs_clean "
         "ORDER BY COALESCE(posted_at,'') DESC, rowid DESC",
-        con
+        con,
     )
     con.close()
     for col in ["title", "company", "location"]:
         df[f"_{col}_na"] = df[col].map(no_accents).str.lower()
     return df
 
+# ------- Formularz wyszukiwania (Enter uruchamia submit) -------
 with st.form("search"):
-    c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
+    c1, c2, c3 = st.columns([2, 2, 1])
     ttl = c1.text_input("Tytuł (np. data, python, analityk)", "")
     loc = c2.text_input("Lokalizacja (np. Poznań / Poznan / Zdalnie)", "")
     sen = c3.text_input("Seniority (puste = wszystkie)", "")
-    limit = c4.selectbox("Limit", [50, 100, 200, 500, 1000], index=2)
     st.form_submit_button("Szukaj (Enter)")
 
+# ------- Limit poza formularzem (działa natychmiast) -------
+limit = st.selectbox("Limit wyników", [50, 100, 200, 500, 1000], index=2)
+
+# ------- Filtrowanie + wyświetlanie -------
 df = load_df()
 base = len(df)
 
@@ -45,9 +50,11 @@ if loc.strip():
 if sen.strip():
     df = df[df["seniority"].fillna("").str.lower().str.contains(sen.lower(), na=False)]
 
-st.caption(f"{len(df)} ofert (z {base} w bazie) • firm: {df['company'].nunique()}")
+st.caption(f"{len(df)} ofert (z {base} w bazie)")
 
+# Zastosuj limit TU — przed renderem
 df = df.head(limit).copy()
+
 if df.empty:
     st.info("Brak wyników dla podanych filtrów.")
 else:
