@@ -1,4 +1,4 @@
-# AI Career Assistant — NFJ Job Finder
+# Career Assistant — NFJ Job Finder
 
 Minimalna wyszukiwarka ofert IT z **NoFluffJobs**: ETL → **SQLite** → prosty **Streamlit** z filtrami (tytuł, lokalizacja, seniority).  
 Klik w **tytuł** otwiera ogłoszenie w nowej karcie.
